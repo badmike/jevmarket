@@ -1,0 +1,51 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste your config file, private key, OpenRouter key or wallet address. Use `jevmarket config show`, which masks secrets.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you ran, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. jevmarket config set ...
+        2. jevmarket decide <slug>
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: Relevant output, ideally with `RUST_LOG=jevmarket=debug`.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `jevmarket --version`.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS, Windows]
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Trading mode
+      options: [dry run, live, not trading (scan/research/decide/stats)]
+    validations:
+      required: true
