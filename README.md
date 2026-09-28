@@ -45,6 +45,12 @@ Jev has no browsing and a training cutoff. Asked about a news-driven market on i
 
 ## Install
 
+With Homebrew on macOS or Linux:
+
+```bash
+brew install badmike/tap/jevmarket
+```
+
 From source (Rust 1.88 or newer):
 
 ```bash

@@ -7,6 +7,7 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 - ✨ `jevmarket service install|uninstall|restart|status` runs the daemon as a login service, a launchd agent on macOS or a systemd user unit on Linux
 - ✨ Install the web console as an app on iOS and Android: web app manifest, home screen icons, full-screen standalone mode
+- 📦 Homebrew formula: `brew install badmike/tap/jevmarket`, updated by the release workflow
 - ✨ Skips carry a reason code (`decisions.skip_code`, backfilled for older rows), so the console explains them without parsing log text
 - ✨ Orders remember their market question; open orders and the order log always name their market
 - 🐛 An open console reloads itself when it reconnects to a daemon running a newer build, and retries at once when the tab or network comes back
