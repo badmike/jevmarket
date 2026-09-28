@@ -250,6 +250,8 @@ export interface Position {
   value_usd: number
   pnl_usd: number
   redeemable: boolean
+  /** When jevmarket first bought this outcome live, unix seconds; null when bought elsewhere. */
+  ordered_at: number | null
   /** The market's thumbnail URL. */
   image: string | null
   /** When the market is scheduled to resolve, `YYYY-MM-DD`. */

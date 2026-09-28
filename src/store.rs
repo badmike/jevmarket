@@ -467,6 +467,16 @@ impl Store {
         Ok(self.conn.query_row(&sql, [condition_id], |row| row.get(0))?)
     }
 
+    /// When the first live buy of this outcome token reached the book, in unix seconds. `None`
+    /// for a position bought outside jevmarket.
+    pub fn first_buy_at(&self, token_id: &str) -> Result<Option<f64>> {
+        let sql = format!(
+            "SELECT MIN(ts) FROM orders WHERE token_id = ?1 AND side IS NOT 'SELL' AND dry_run = 0
+                 AND status NOT IN {DEAD_STATUSES}"
+        );
+        Ok(self.conn.query_row(&sql, [token_id], |row| row.get(0))?)
+    }
+
     /// Keep an eye on a market in the price watch, whatever its view's age.
     pub fn watch(&self, slug: &str, condition_id: &str, question: &str) -> Result<()> {
         self.conn.execute(
@@ -733,6 +743,12 @@ mod tests {
         st.log_order(&dry).unwrap();
         assert!(!st.has_order_for("c2", false).unwrap());
         assert!(st.has_order_for("c2", true).unwrap());
+
+        let dry_only = OrderRow { token_id: "dry", ..dry };
+        st.log_order(&dry_only).unwrap();
+        assert!(st.first_buy_at("t").unwrap().is_some());
+        assert_eq!(st.first_buy_at("dry").unwrap(), None, "dry runs bought nothing");
+        assert_eq!(st.first_buy_at("elsewhere").unwrap(), None);
 
         let s = st.stats().unwrap();
         assert_eq!((s.decisions, s.trade_signals, s.live_orders, s.live_usd), (1, 1, 1, 5.0));

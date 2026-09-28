@@ -15,7 +15,7 @@ import {
 } from '~/components/ui/table'
 import TableLoadingRow from '~/components/ui/TableLoadingRow.vue'
 import { SimpleTooltip } from '~/components/ui/tooltip'
-import { day, inDays, prob, signedUsd, usd } from '~/lib/format'
+import { ago, at, day, dayAt, inDays, prob, signedUsd, usd } from '~/lib/format'
 import type { TableSort } from '~/lib/table'
 
 /** The wallet's positions. Redeemable ones stay on top whatever the sort, they want action. */
@@ -29,8 +29,9 @@ const pnlShare = (p: Position) => (cost(p) > 0 ? p.pnl_usd / cost(p) : 0)
 const signedPercent = (v: number) => `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
 const tone = (v: number) => (v < 0 ? 'text-destructive' : v > 0 ? 'text-success' : 'text-muted')
 
-/** Sort keys; `null` (no end date) sorts last in both directions. */
+/** Sort keys; `null` (no date) sorts last in both directions. */
 const columns: Record<string, (p: Position) => number | null> = {
+  ordered: (p) => p.ordered_at,
   resolves: (p) => (p.end_date ? Date.parse(p.end_date) : null),
   size: (p) => p.size,
   value: (p) => p.value_usd,
@@ -72,6 +73,17 @@ const rows = computed(() => {
       <TableRow>
         <TableHead class="w-full min-w-64">Market</TableHead>
         <TableHead>Outcome</TableHead>
+        <TableSortableHead
+          v-model="sort"
+          column="ordered"
+        >
+          <SimpleTooltip
+            tooltip="When jevmarket first bought this outcome. Empty for shares bought elsewhere."
+            as-child
+          >
+            <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Ordered</span>
+          </SimpleTooltip>
+        </TableSortableHead>
         <TableSortableHead
           v-model="sort"
           column="resolves"
@@ -132,7 +144,7 @@ const rows = computed(() => {
     <TableBody>
       <TableLoadingRow
         v-if="!positions"
-        :colspan="7"
+        :colspan="8"
         :rows="3"
       />
       <TableRow
@@ -175,6 +187,26 @@ const rows = computed(() => {
           >
             {{ p.outcome }}
           </Badge>
+        </TableCell>
+        <TableCell
+          label="Ordered"
+          labelled
+          class="whitespace-nowrap"
+        >
+          <template v-if="p.ordered_at">
+            <SimpleTooltip
+              :tooltip="at(p.ordered_at)"
+              as-child
+            >
+              <span class="text-primary tabular-nums">{{ dayAt(p.ordered_at) }}</span>
+            </SimpleTooltip>
+            <span class="block text-xs text-muted">{{ ago(p.ordered_at) }}</span>
+          </template>
+          <span
+            v-else
+            class="text-muted"
+            >–</span
+          >
         </TableCell>
         <TableCell
           label="Resolves"

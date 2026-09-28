@@ -11,6 +11,7 @@ const int = new Intl.NumberFormat('en')
 const dateTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' })
 const clock = new Intl.DateTimeFormat('en', { timeStyle: 'medium' })
 const calendarDay = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeZone: 'UTC' })
+const localDay = new Intl.DateTimeFormat('en', { dateStyle: 'medium' })
 const rel = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
 
 const DASH = '–'
@@ -36,6 +37,10 @@ export const percent = (v: number | null | undefined): string =>
 
 export const at = (ts: number | null | undefined): string =>
   ts == null ? DASH : dateTime.format(new Date(ts * 1000))
+
+/** `Sep 20, 2026` for unix seconds, in local time. */
+export const dayAt = (ts: number | null | undefined): string =>
+  ts == null ? DASH : localDay.format(new Date(ts * 1000))
 
 export const clockTime = (ts: number): string => clock.format(new Date(ts * 1000))
 

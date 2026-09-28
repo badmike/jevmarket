@@ -243,6 +243,8 @@ pub struct Position {
     pub value_usd: f64,
     pub pnl_usd: f64,
     pub redeemable: bool,
+    /// When jevmarket first bought this outcome live, unix seconds. `None` when bought elsewhere.
+    pub ordered_at: Option<f64>,
     /// When the market is scheduled to resolve, `YYYY-MM-DD`.
     pub end_date: Option<String>,
     pub image: Option<String>,

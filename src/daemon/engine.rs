@@ -564,6 +564,10 @@ impl Engine {
                 value_usd: d(p.current_value),
                 pnl_usd: d(p.cash_pnl),
                 redeemable: p.redeemable,
+                ordered_at: self.db.store.first_buy_at(&p.asset.to_string()).unwrap_or_else(|e| {
+                    tracing::warn!("looking up the first order of token {}: {e:#}", p.asset);
+                    None
+                }),
                 end_date: p.end_date.map(|d| d.to_string()),
                 image: Some(p.icon).filter(|url| !url.is_empty()),
             })

@@ -519,11 +519,17 @@ async fn positions(s: &Settings, paths: &Paths) -> Result<()> {
     println!("wallet {} ({})  pUSD: {balance}", ex.wallet_label(), ex.wallet_type());
 
     let d = |x: rust_decimal::Decimal, dp: usize| format!("{:.dp$}", x.to_f64().unwrap_or_default());
-    let mut t = ui::table("open positions", &["slug", "outcome", "size", "avg", "cur", "value $", "pnl $"], 2);
+    let ordered = |token_id: String| -> Result<String> {
+        let at = store.first_buy_at(&token_id)?.and_then(|ts| chrono::DateTime::from_timestamp(ts as i64, 0));
+        Ok(at.map_or_else(|| "-".into(), |at| at.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string()))
+    };
+    let mut t =
+        ui::table("open positions", &["slug", "outcome", "ordered", "size", "avg", "cur", "value $", "pnl $"], 3);
     for p in ex.positions().await? {
         t.add_row([
             p.slug.chars().take(60).collect(),
             p.outcome.clone(),
+            ordered(p.asset.to_string())?,
             d(p.size, 2),
             d(p.avg_price, 3),
             d(p.cur_price, 3),
