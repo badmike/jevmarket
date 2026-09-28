@@ -31,16 +31,17 @@ Jev has no browsing and a training cutoff. Asked about a news-driven market on i
  CLOB      + web search JSON      answers  Kelly, gates  + hard caps
 ```
 
-1. **Scan** (`markets.rs`). Open markets by 24h volume from the Gamma API, filtered by liquidity, volume, days to resolution, spread, price band and Yes/No outcome labels. Order books for a whole page of markets arrive in one batched CLOB request.
-2. **Research** (`research.rs`). A chat model with OpenRouter's web plugin returns strict JSON: as-of date, summary, dated key facts, latest development, considerations for and against YES, sources. Prediction-market and odds sites are excluded from search, so market prices never reach Jev as "evidence". Briefs are cached in SQLite for `research_ttl_hours`.
-3. **State** (`markets.rs`). `question`, truncated `description`, `today`, `days_until_resolution` (pre-computed, Jev is bad at date math), `resolution_source`, `market_implied_probability_yes` and `evidence`. Nothing else: Jev reads literally and gets worse with irrelevant context.
+1. **Scan** (`markets.rs`). Open markets by 24h volume from the Gamma API, filtered by liquidity, volume, days to resolution, spread, price band and Yes/No outcome labels. Order books for a whole page of markets arrive in one batched CLOB request. The survivors are ranked by where research can pay off: markets with no ask inside the trade band go last, then sooner resolution and thinner books (under about $100k liquidity) come first.
+2. **Research** (`research.rs`). Before paying for a brief, one clarity-only Jev call on the state without evidence (about $0.00003) screens out markets whose resolution criteria score below `min_clarity`. Then a chat model with OpenRouter's web plugin returns strict JSON: as-of date, summary, dated key facts (newest first), latest development, scheduled events that could settle the question, what the named resolution source currently shows, considerations for and against YES, sources. Prediction-market and odds sites are excluded from search, so market prices never reach Jev as "evidence". Briefs are cached in SQLite for `research_ttl_hours` together with the midpoint at the time; once the midpoint moves more than `research_max_price_move`, the market has likely seen news and is researched again.
+3. **State** (`markets.rs`). `question`, truncated `description`, `today`, `days_until_resolution` (pre-computed, Jev is bad at date math), `resolution_source`, `market_implied_probability_yes` (unless `jev_sees_market_price` is off) and `evidence`. Nothing else: Jev reads literally and gets worse with irrelevant context. When the evidence is over `research_max_chars`, considerations are trimmed first, for and against YES in turn so the trim never tilts the brief, then the oldest key facts, then the latest scheduled events.
 4. **Ask Jev** (`signal.rs`). One call, three questions:
    - `resolves_yes` (noul): P(YES)
    - `answerable` (noul): does the state hold enough current information for a well-informed estimate? This is information sufficiency, not certainty.
    - `clarity` (score 0 to 4): how objective the resolution criteria are
 5. **Evaluate** (`signal.rs`, a pure function). Skip unless answerable and clear. Consider only contracts whose ask sits inside `[min_trade_price, max_trade_price]`. Pick the side with the larger edge and require `p − ask ≥ min_edge`. Size with fractional Kelly against `max_open_exposure_usd`, capped at `max_usd_per_trade`, rounded to the market's tick and minimum size.
+   A trade signal on a cached brief is researched again and re-evaluated, so orders only go out on evidence from this pass (`pipeline.rs`). Edges above `suspicious_edge` are logged and skipped: after fresh research that big a gap is more often the model than the market.
 6. **Execute** (`executor.rs`). A GTC limit buy at the best ask, placed only if every cap passes. This is the only module that can spend money.
-7. **Log** (`store.rs`). Every brief, decision and order goes to SQLite, so Jev's calibration can be checked against resolutions later (`stats`).
+7. **Log** (`store.rs`). Every brief, decision and order goes to SQLite. Each `run` pass first fetches the outcomes of logged markets that have resolved (one Gamma request per 50 markets), so `stats` can score Jev against real results.
 
 ## Install
 
@@ -136,20 +137,23 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `polygon_rpc_url` | `https://polygon-rpc.com` | Only used by `setup` |
 | **Jev** | | |
 | `jev_model` | `typesafe/jev-1.13` | Pin a Jev version; `typesafe/jev-latest` also works |
+| `jev_sees_market_price` | `true` | Put the market midpoint into the Jev state. `stats` compares Brier scores with and without it |
 | **Researcher** | | |
 | `research_enabled` | `true` | `false` runs Jev alone (expect near-zero trades) |
 | `research_model` | `deepseek/deepseek-v4-pro-0813` | Any OpenRouter chat model, see below |
 | `research_ttl_hours` | `6` | Reuse a cached brief for this long |
 | `max_research_per_run` | `20` | Hard cap on researcher calls per `run` pass |
-| `research_max_results` | `5` | Web search results per brief |
+| `research_max_results` | `8` | Web search results per brief |
 | `research_max_chars` | `2500` | Size limit of the evidence block in the Jev state |
 | `research_exclude_domains` | 12 odds sites | Domains the web search must never return |
 | `concurrency` | `4` | Markets researched and priced in parallel during `run` |
+| `research_max_price_move` | `0.05` | Research a cached brief again once the midpoint moved more than this since it was written |
 | **Signal** | | |
 | `min_edge` | `0.08` | Required `P_jev − best ask` |
 | `min_answerable` | `0.70` | Jev's belief that the state has enough information |
 | `min_clarity` | `2` | 0 to 4 score of the resolution criteria |
 | `min_trade_price` / `max_trade_price` | `0.10` / `0.90` | Only buy contracts priced in this band |
+| `suspicious_edge` | `0.25` | Skip edges above this even on fresh evidence, as likely model errors |
 | **Market filter** | | |
 | `min_liquidity_usd` | `5000` | |
 | `min_volume_usd` | `10000` | |
@@ -181,12 +185,16 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `research <slug\|url> [--fresh]` | Researcher only: print the full evidence brief with sources |
 | `decide <slug\|url> [--show-state] [--no-research] [--fresh]` | Research, ask Jev, show the proposed trade. Never places orders, always logs the decision |
 | `run [--dry-run] [--max-trades N] [-n 20] [--loop SECS] [--no-research]` | The full pipeline. **Live by default** |
+| `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
+| `resolve` | Fetch outcomes of decided or ordered markets that resolved since the last check. `run` does this at the start of every pass |
 | `setup` | One-time pUSD and outcome-token approvals for the exchange contracts (raw EOA only) |
 | `positions` | pUSD balance, open positions, open orders, current exposure against the cap |
-| `stats` | Decision and order counts, spend, and Jev P(yes) buckets against the market midpoint |
+| `stats` | Decision and order counts, spend, Jev P(yes) buckets, calibration on resolved markets, and PnL. See below |
 | `config path\|init\|show\|set` | See [Configuration](#configuration) |
 
 Markets can be given as a slug or a polymarket.com URL: `/event/<event>/<market>`, `/market/<market>`, or `/event/<event>` when the event has a single market. For multi-market events the error lists the market slugs to choose from.
+
+`stats` scores Jev on resolved markets, using each market's latest decision with a Jev probability so markets seen on every pass count once. It reports the Brier score of Jev's P(yes) and of the market midpoint at decision time (lower is better), and the hit rate of the side with the larger edge, split by `jev_sees_market_price` variant, by edge, by `answerable` and by clarity. PnL is reported for live orders and, separately, for the hypothetical dry-run orders, both assuming each order filled at its limit price. `positions` shows what the exchange actually filled.
 
 `run --loop 900` repeats every 15 minutes until Ctrl-C. A failed pass (an API hiccup, a network drop) is reported and the loop carries on; a rejected OpenRouter key or exhausted credits stop it, since every further call would fail the same way.
 
@@ -195,8 +203,9 @@ Markets can be given as a slug or a polymarket.com URL: `/event/<event>/<market>
 Every order has to pass all of these, in this order:
 
 1. **Signal gates** (`signal.rs`): `answerable ≥ min_answerable`, `clarity ≥ min_clarity`, ask inside the trade band, `edge ≥ min_edge`.
-2. **Sizing**: fractional Kelly, capped at `max_usd_per_trade`. If the market's minimum order size would push the order past 1.5× that cap, the trade is refused.
-3. **Executor checks** (`executor.rs`), re-evaluated immediately before each order:
+2. **Fresh evidence** (`pipeline.rs`): a signal on a cached brief is researched again and has to pass the gates a second time; `edge ≤ suspicious_edge`.
+3. **Sizing**: fractional Kelly, capped at `max_usd_per_trade`. If the market's minimum order size would push the order past 1.5× that cap, the trade is refused.
+4. **Executor checks** (`executor.rs`), re-evaluated immediately before each order:
    - no more than `max_trades_per_run` orders this pass
    - no second order on a market the database already has a live order for
    - no order on a market where the wallet already holds a position or an open order
@@ -220,9 +229,9 @@ Since the April 2026 exchange upgrade Polymarket settles in **pUSD** (`0xC011a7E
 Same behavior:
 
 - Command names, flags and defaults, including `run` being live by default.
-- The researcher system prompt, the Jev questions and the clarity rubric, word for word.
+- The Jev questions and the clarity rubric, word for word.
 - Edge, band, Kelly and tick-rounding math. The Python test cases are ported one to one.
-- The SQLite schema. Point `db_path` at an existing `jevymarket.db` and `stats` keeps counting, cached briefs included.
+- The SQLite schema, extended only by adding: a `resolutions` table and a `midpoint` column on `research`, created on first open. Point `db_path` at an existing `jevymarket.db` and `stats` keeps counting, cached briefs included.
 
 Different, on purpose:
 
@@ -236,11 +245,15 @@ Different, on purpose:
 - **Wallet type detection** from the address, as described in [Funding](#funding).
 - **`setup` skips approvals already granted** and refreshes the exchange's balance cache afterwards.
 - **polymarket.com URLs** for single-market events resolve to the market, and multi-market events list their market slugs.
+- **Research spent where it can pay.** A clarity pre-screen before each paid brief, and candidates ranked by opportunity instead of 24h volume.
+- **Richer briefs.** The researcher also reports scheduled events and the current state of the resolution source, and returns key facts newest first. Trimming for size is balanced between for and against YES; the original dropped every point against YES before any point for it.
+- **No trades on stale evidence.** Cached briefs are dropped when the price moves, trade signals on cached briefs are researched again, and very large edges are skipped.
+- **Real calibration.** `resolve` records outcomes; `stats` reports Brier scores, hit rates and PnL.
 
 ## Known limitations
 
 - **Longshot bias.** Jev tends to be less confident than the market at the extremes, which shows up as "edge" on 5-cent contracts. The trade band is the guard; widen it only with evidence from `stats`.
-- **Edge is not profit.** A limit order at the ask takes liquidity. Adverse selection and stale briefs eat into an 8-point threshold. Run `--dry-run`, watch `stats`, then trade small.
+- **Edge is not profit.** A limit order at the ask takes liquidity. Adverse selection eats into an 8-point threshold. Run `--dry-run`, watch `stats` once markets resolve, then trade small.
 - **No exits.** Positions are held to resolution.
 - **Beta endpoint.** OpenRouter's Decisions API is in beta. Answers are parsed leniently (`noul`, `probability`, `p` or `value` all work), but re-run `jev-test` after a Jev version bump.
 - **Jev reads literally** and degrades with irrelevant context. Keep the state small; every new field needs a reason.
@@ -257,9 +270,9 @@ src/
   research.rs    researcher prompt, Brief, JSON extraction from model output
   signal.rs      the three questions, evaluate(): gates, edge, Kelly (pure)
   markets.rs     Gamma scan, filters, batched order books, Jev state
-  pipeline.rs    brief cache -> state -> Jev, decision logging
+  pipeline.rs    pre-screen, brief cache -> state -> Jev -> evaluate, stale-evidence guard, logging
   executor.rs    caps, order placement, positions, approvals
-  store.rs       SQLite log and research cache
+  store.rs       SQLite log, research cache, resolutions, calibration and PnL
   ui.rs          tables and colored output
 ```
 

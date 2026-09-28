@@ -1,6 +1,7 @@
 //! jevmarket: a Polymarket trading bot priced by Jev (TypeSafe AI) via OpenRouter.
 
 mod config;
+mod daemon;
 mod executor;
 mod jev;
 mod markets;
@@ -19,7 +20,6 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use console::style;
-use futures::StreamExt as _;
 use indexmap::IndexMap;
 use polymarket_client_sdk_v2::{clob, gamma};
 use rust_decimal::prelude::ToPrimitive as _;
@@ -29,10 +29,9 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{Paths, Settings};
 use crate::executor::Executor;
 use crate::jev::{JevClient, Question};
-use crate::markets::{load_candidate, scan, today};
+use crate::markets::{load_candidate, scan, today, update_resolutions};
 use crate::openrouter::OpenRouter;
-use crate::pipeline::{Pipeline, Research, is_fatal};
-use crate::signal::{Verdict, evaluate};
+use crate::pipeline::{Decided, Pipeline, Research, Step, is_fatal};
 use crate::store::Store;
 
 #[derive(Parser)]
@@ -109,8 +108,12 @@ enum Command {
     Setup,
     /// Show wallet balance, open positions and open orders.
     Positions,
-    /// Decision/order counts, spend, and a rough Jev-vs-market calibration table.
+    /// Decision/order counts, spend, Jev-vs-market calibration on resolved markets, and PnL.
     Stats,
+    /// Fetch outcomes of decided or ordered markets that have resolved since the last check.
+    Resolve,
+    /// Run the trading loop in the background and serve a live web console for it.
+    Daemon(daemon::Args),
     /// Inspect or edit the config file.
     Config {
         #[command(subcommand)]
@@ -165,6 +168,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Config { action } => return config_cmd(&paths, action),
         Command::Init => return onboard::run(&paths).await,
+        Command::Daemon(args) => return daemon::run(paths, args).await,
         _ => {}
     }
     let s = Settings::load(&paths.config)?;
@@ -187,7 +191,12 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Setup => setup(&s, &paths).await,
         Command::Positions => positions(&s, &paths).await,
         Command::Stats => stats(&s, &paths),
-        Command::Config { .. } | Command::Init => unreachable!("handled above"),
+        Command::Resolve => {
+            let n = update_resolutions(&gamma::Client::default(), &open_store(&s, &paths)?).await?;
+            println!("{n} new resolutions");
+            Ok(())
+        }
+        Command::Config { .. } | Command::Init | Command::Daemon(_) => unreachable!("handled above"),
     }
 }
 
@@ -328,11 +337,16 @@ async fn decide(
     let pipeline = Pipeline::new(s, &store, research)?;
     let (gamma, clob) = clients(s)?;
     let cand = load_candidate(&gamma, &clob, reference).await?;
-    let a = pipeline.assess(&cand, fresh).await?;
+    let (a, verdict) = match pipeline.decide(&cand, fresh).await? {
+        Decided::Unclear(reason) => {
+            ui::print_unclear(&cand, &reason);
+            return Ok(());
+        }
+        Decided::Assessed(a, verdict) => (a, verdict),
+    };
     if show_state {
         println!("{}", serde_json::to_string_pretty(&a.state)?);
     }
-    let verdict = evaluate(&a.view, &cand.book, s);
     ui::print_decision(&cand, &a, &verdict);
     pipeline.log(&cand, &a, &verdict, false)
 }
@@ -345,9 +359,7 @@ async fn run(s: &Settings, paths: &Paths, limit: usize, every: Option<u64>, no_r
     let mut ex = Executor::create(s, &store, s.dry_run).await?;
     let (gamma, clob) = clients(s)?;
     loop {
-        ex.trades_this_run = 0;
-        pipeline.reset_budget();
-        let pass = run_pass(s, &store, &mut ex, &pipeline, &gamma, &clob, limit).await;
+        let pass = run_pass(s, &pipeline, &mut ex, &gamma, &clob, limit).await;
         match (pass, every) {
             (Ok(()), None) => return Ok(()),
             (Err(e), None) => return Err(e),
@@ -366,67 +378,44 @@ async fn run(s: &Settings, paths: &Paths, limit: usize, every: Option<u64>, no_r
     }
 }
 
+/// One `run` pass, printed to the terminal.
 async fn run_pass(
     s: &Settings,
-    store: &Store,
-    ex: &mut Executor<'_>,
     pipeline: &Pipeline<'_>,
+    ex: &mut Executor<'_>,
     gamma: &gamma::Client,
     clob: &clob::Client,
     limit: usize,
 ) -> Result<()> {
-    let cands = scan(gamma, clob, s, limit, 5).await?;
-    let exposure = ex.exposure(true).await?;
-    ui::rule(&format!("{} candidates | exposure ${:.2} | dry_run={}", cands.len(), exposure.total(), s.dry_run));
-
-    let mut todo = Vec::with_capacity(cands.len());
-    for c in cands {
-        if exposure.condition_ids.contains(&c.market.condition_id)
-            || store.has_order_for(&c.market.condition_id, false)?
-        {
-            println!("{}", style(format!("{}: already exposed, skip", c.market.slug)).dim());
-        } else {
-            todo.push(c);
-        }
-    }
-
-    // Research and Jev run `concurrency` markets ahead; orders are still placed one at a time,
-    // in scan order, so the caps see every earlier fill.
-    let mut assessed = futures::stream::iter(todo)
-        .map(|c| async move {
-            let a = pipeline.assess(&c, false).await;
-            (c, a)
+    let dry_run = s.dry_run;
+    pipeline
+        .pass(ex, gamma, clob, limit, std::future::pending(), |step| match step {
+            Step::Resolved(n) => println!("{}", style(format!("{n} markets resolved since the last pass")).dim()),
+            Step::AlreadyExposed(c) => println!("{}", style(format!("{}: already exposed, skip", c.market.slug)).dim()),
+            Step::Scanned { candidates, exposure_usd } => {
+                ui::rule(&format!("{candidates} candidates | exposure ${exposure_usd:.2} | dry_run={dry_run}"));
+            }
+            Step::Unclear(c, reason) => ui::print_unclear(c, reason),
+            Step::Failed(c, e) => println!("{}", style(format!("{}: {}", c.market.slug, chain(e))).red()),
+            Step::Decided { c, a, verdict, placed } => {
+                ui::print_decision(c, a, verdict);
+                match placed {
+                    Some(p) if p.ok => {
+                        println!("  {} order_id={}", style(&p.status).green(), p.order_id.as_deref().unwrap_or("-"));
+                    }
+                    Some(p) => {
+                        println!(
+                            "  {}",
+                            style(format!("{}: {}", p.status, p.message.as_deref().unwrap_or_default())).yellow()
+                        );
+                    }
+                    None => {}
+                }
+            }
+            Step::TradeCapReached => println!("{}", style("trade cap for this run reached").bold()),
+            Step::Stopped => {}
         })
-        .buffered(s.concurrency.max(1));
-    while let Some((c, a)) = assessed.next().await {
-        let a = match a {
-            Ok(a) => a,
-            Err(e) if is_fatal(&e) => return Err(e),
-            Err(e) => {
-                println!("{}", style(format!("{}: {}", c.market.slug, chain(&e))).red());
-                continue;
-            }
-        };
-        let verdict = evaluate(&a.view, &c.book, s);
-        ui::print_decision(&c, &a, &verdict);
-        let mut executed = false;
-        if let Verdict::Trade(t) = &verdict {
-            let placed = ex.place(&c, t).await?;
-            executed = placed.ok;
-            match (placed.ok, placed.order_id) {
-                (true, id) => println!("  {} order_id={}", style(&placed.status).green(), id.as_deref().unwrap_or("-")),
-                (false, _) => println!(
-                    "  {}",
-                    style(format!("{}: {}", placed.status, placed.message.unwrap_or_default())).yellow()
-                ),
-            }
-        }
-        pipeline.log(&c, &a, &verdict, executed)?;
-        if ex.trades_this_run >= s.max_trades_per_run {
-            println!("{}", style("trade cap for this run reached").bold());
-            break;
-        }
-    }
+        .await?;
     println!("{}", style(pipeline.spend()).dim());
     Ok(())
 }
@@ -505,5 +494,38 @@ fn stats(s: &Settings, paths: &Paths) -> Result<()> {
         ]);
     }
     println!("{t}");
+
+    let c = &st.calibration;
+    let mut t = ui::table(
+        &format!("Jev vs market on {} resolved markets (latest decision each)", c.all.n),
+        &["by", "group", "n", "hit rate", "brier jev", "brier market"],
+        2,
+    );
+    let sections = [
+        ("all", std::slice::from_ref(&c.all)),
+        ("variant", &c.by_variant[..]),
+        ("edge", &c.by_edge[..]),
+        ("answerable", &c.by_answerable[..]),
+        ("clarity", &c.by_clarity[..]),
+    ];
+    for (by, groups) in sections {
+        for g in groups.iter().filter(|g| g.n > 0) {
+            t.add_row([
+                by.to_owned(),
+                g.label.clone(),
+                g.n.to_string(),
+                format!("{:.0}%", g.hit_rate * 100.0),
+                format!("{:.3}", g.brier_jev),
+                format!("{:.3}", g.brier_market),
+            ]);
+        }
+    }
+    println!("{t}");
+    for (name, p) in [("live", &st.live_pnl), ("dry-run", &st.dry_run_pnl)] {
+        println!(
+            "{name} pnl: {} of {} orders resolved, staked ${:.2}, paid out ${:.2}, pnl ${:+.2}",
+            p.resolved, p.orders, p.staked_usd, p.payout_usd, p.pnl_usd
+        );
+    }
     Ok(())
 }

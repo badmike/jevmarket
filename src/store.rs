@@ -1,11 +1,13 @@
-//! SQLite log of every Jev decision, research brief and order, for later calibration analysis.
-//! The schema matches the Python jevymarket database, so an existing file can be reused.
+//! SQLite log of every Jev decision, research brief, order and market resolution, for
+//! calibration and PnL analysis. The schema extends the Python jevymarket database additively,
+//! so an existing file can be reused.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OptionalExtension as _, params};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::research::Brief;
@@ -38,7 +40,8 @@ CREATE TABLE IF NOT EXISTS research (
     slug TEXT NOT NULL,
     model TEXT,
     brief_json TEXT NOT NULL,
-    cost REAL
+    cost REAL,
+    midpoint REAL
 );
 CREATE INDEX IF NOT EXISTS idx_research_slug ON research(slug, ts);
 CREATE TABLE IF NOT EXISTS orders (
@@ -57,9 +60,20 @@ CREATE TABLE IF NOT EXISTS orders (
     dry_run INTEGER,
     response_json TEXT
 );
+CREATE TABLE IF NOT EXISTS resolutions (
+    condition_id TEXT PRIMARY KEY,
+    slug TEXT NOT NULL,
+    yes_price REAL NOT NULL,
+    resolved_at TEXT,
+    ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_decisions_slug ON decisions(slug);
 CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 ";
+
+/// Columns added after a table was first shipped. `CREATE TABLE IF NOT EXISTS` leaves older
+/// files as they are, so these are added on open when missing.
+const ADDED_COLUMNS: [(&str, &str, &str); 1] = [("research", "midpoint", "REAL")];
 
 /// Orders in these states never reached the book.
 const DEAD_STATUSES: &str = "('failed','rejected')";
@@ -70,8 +84,9 @@ pub struct DecisionRow<'a> {
     pub condition_id: &'a str,
     pub question: &'a str,
     pub state: &'a Value,
-    pub p_yes: f64,
-    pub answerable: f64,
+    /// `None` when only the clarity pre-screen ran.
+    pub p_yes: Option<f64>,
+    pub answerable: Option<f64>,
     pub clarity: u8,
     pub yes_ask: Option<f64>,
     pub no_ask: Option<f64>,
@@ -100,7 +115,7 @@ pub struct OrderRow<'a> {
     pub response: Option<&'a Value>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Bucket {
     /// `floor(p_yes * 10)`.
     pub bucket: i64,
@@ -109,7 +124,7 @@ pub struct Bucket {
     pub avg_market: f64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     pub decisions: i64,
     pub trade_signals: i64,
@@ -119,6 +134,80 @@ pub struct Stats {
     pub live_orders: i64,
     pub live_usd: f64,
     pub buckets: Vec<Bucket>,
+    pub calibration: Calibration,
+    pub live_pnl: Pnl,
+    pub dry_run_pnl: Pnl,
+}
+
+/// How a market resolved, from Gamma.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Resolution {
+    pub condition_id: String,
+    pub slug: String,
+    /// Payout of one YES share: 1 for YES, 0 for NO, 0.5 for a 50-50 resolution.
+    pub yes_price: f64,
+    /// As Gamma reports it (`closedTime`).
+    pub resolved_at: Option<String>,
+}
+
+/// Orders on resolved markets, each assumed filled in full at its limit price.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Pnl {
+    /// Orders that reached the book (or would have, for dry runs).
+    pub orders: i64,
+    /// Of those, orders on markets that have resolved.
+    pub resolved: i64,
+    pub staked_usd: f64,
+    pub payout_usd: f64,
+    pub pnl_usd: f64,
+}
+
+/// Jev against the market on resolved markets, one decision per market: the latest one with a
+/// Jev probability, so markets decided on every pass do not outweigh the rest.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Calibration {
+    pub all: Group,
+    /// With and without `market_implied_probability_yes` in the state.
+    pub by_variant: Vec<Group>,
+    /// Best edge at decision time: `p - ask` on the side Jev favored.
+    pub by_edge: Vec<Group>,
+    pub by_answerable: Vec<Group>,
+    pub by_clarity: Vec<Group>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Group {
+    pub label: String,
+    pub n: i64,
+    /// Mean payout of the side with the larger edge: the share of calls Jev got right.
+    pub hit_rate: f64,
+    /// Mean squared error of Jev's P(yes) against the outcome. Lower is better.
+    pub brier_jev: f64,
+    /// Same for the market midpoint at decision time.
+    pub brier_market: f64,
+}
+
+/// One resolved decision, the input to [`calibrate`].
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub p_yes: f64,
+    pub answerable: f64,
+    pub clarity: u8,
+    pub yes_ask: Option<f64>,
+    pub no_ask: Option<f64>,
+    pub midpoint: f64,
+    /// Jev saw `market_implied_probability_yes`.
+    pub saw_price: bool,
+    pub yes_price: f64,
+}
+
+impl Resolved {
+    /// `(bought YES, edge)` for the side with the larger edge; the midpoint stands in for a missing ask.
+    fn best_side(&self) -> (bool, f64) {
+        let yes = self.p_yes - self.yes_ask.unwrap_or(self.midpoint);
+        let no = (1.0 - self.p_yes) - self.no_ask.unwrap_or(1.0 - self.midpoint);
+        if yes >= no { (true, yes) } else { (false, no) }
+    }
 }
 
 pub struct Store {
@@ -133,6 +222,16 @@ impl Store {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        for (table, column, kind) in ADDED_COLUMNS {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+                [table, column],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
+            }
+        }
         Ok(Self { conn })
     }
 
@@ -188,27 +287,88 @@ impl Store {
         Ok(())
     }
 
-    /// Newest brief for `slug` younger than `max_age_s`, returned with cost zeroed (already paid).
-    pub fn get_brief(&self, slug: &str, max_age_s: f64) -> Result<Option<Brief>> {
-        let json: Option<String> = self
+    /// Newest brief for `slug` younger than `max_age_s` with the market midpoint when it was
+    /// written, returned with cost zeroed (already paid).
+    pub fn get_brief(&self, slug: &str, max_age_s: f64) -> Result<Option<(Brief, Option<f64>)>> {
+        let row: Option<(String, Option<f64>)> = self
             .conn
             .query_row(
-                "SELECT brief_json FROM research WHERE slug = ?1 AND ts >= ?2 ORDER BY ts DESC LIMIT 1",
+                "SELECT brief_json, midpoint FROM research WHERE slug = ?1 AND ts >= ?2 ORDER BY ts DESC LIMIT 1",
                 params![slug, now() - max_age_s],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some(json) = json else { return Ok(None) };
+        let Some((json, midpoint)) = row else { return Ok(None) };
         let brief: Brief = serde_json::from_str(&json).context("corrupt cached brief")?;
-        Ok(Some(Brief { cost: 0.0, ..brief }))
+        Ok(Some((Brief { cost: 0.0, ..brief }, midpoint)))
     }
 
-    pub fn put_brief(&self, slug: &str, brief: &Brief) -> Result<()> {
+    pub fn put_brief(&self, slug: &str, brief: &Brief, midpoint: Option<f64>) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO research (ts, slug, model, brief_json, cost) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![now(), slug, brief.model, serde_json::to_string(brief)?, brief.cost],
+            "INSERT INTO research (ts, slug, model, brief_json, cost, midpoint) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now(), slug, brief.model, serde_json::to_string(brief)?, brief.cost, midpoint],
         )?;
         Ok(())
+    }
+
+    /// Condition ids of decided or ordered markets without a stored resolution.
+    pub fn unresolved_condition_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT condition_id FROM decisions UNION SELECT condition_id FROM orders
+             EXCEPT SELECT condition_id FROM resolutions",
+        )?;
+        let ids = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids.into_iter().flatten().filter(|id| !id.is_empty()).collect())
+    }
+
+    pub fn put_resolution(&self, r: &Resolution) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO resolutions (condition_id, slug, yes_price, resolved_at, ts)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![r.condition_id, r.slug, r.yes_price, r.resolved_at, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Jev's calibration on resolved markets, see [`Calibration`].
+    pub fn calibration(&self) -> Result<Calibration> {
+        let mut stmt = self.conn.prepare(
+            "SELECT d.p_yes, d.answerable, d.clarity, d.yes_ask, d.no_ask, d.midpoint, d.saw_price, r.yes_price
+             FROM (SELECT *, json_extract(state_json, '$.market_implied_probability_yes') IS NOT NULL AS saw_price,
+                          ROW_NUMBER() OVER (PARTITION BY condition_id ORDER BY id DESC) AS nth
+                   FROM decisions WHERE p_yes IS NOT NULL AND midpoint IS NOT NULL) d
+             JOIN resolutions r ON r.condition_id = d.condition_id
+             WHERE d.nth = 1",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Resolved {
+                    p_yes: r.get(0)?,
+                    answerable: r.get::<_, Option<f64>>(1)?.unwrap_or_default(),
+                    clarity: r.get::<_, Option<u8>>(2)?.unwrap_or_default(),
+                    yes_ask: r.get(3)?,
+                    no_ask: r.get(4)?,
+                    midpoint: r.get(5)?,
+                    saw_price: r.get(6)?,
+                    yes_price: r.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(calibrate(&rows))
+    }
+
+    /// PnL of live (`dry_run = false`) or dry-run orders on resolved markets.
+    pub fn pnl(&self, dry_run: bool) -> Result<Pnl> {
+        let sql = format!(
+            "SELECT COUNT(*), COUNT(r.yes_price), COALESCE(SUM(CASE WHEN r.yes_price IS NOT NULL THEN o.usd END), 0),
+                    COALESCE(SUM(o.size * CASE o.outcome WHEN 'YES' THEN r.yes_price ELSE 1 - r.yes_price END), 0)
+             FROM orders o LEFT JOIN resolutions r ON r.condition_id = o.condition_id
+             WHERE o.dry_run = ?1 AND o.status NOT IN {DEAD_STATUSES}"
+        );
+        Ok(self.conn.query_row(&sql, [dry_run], |r| {
+            let (staked_usd, payout_usd): (f64, f64) = (r.get(2)?, r.get(3)?);
+            Ok(Pnl { orders: r.get(0)?, resolved: r.get(1)?, staked_usd, payout_usd, pnl_usd: payout_usd - staked_usd })
+        })?)
     }
 
     pub fn has_order_for(&self, condition_id: &str, include_dry_run: bool) -> Result<bool> {
@@ -245,8 +405,60 @@ impl Store {
         let buckets = stmt
             .query_map([], |r| Ok(Bucket { bucket: r.get(0)?, n: r.get(1)?, avg_p: r.get(2)?, avg_market: r.get(3)? }))?
             .collect::<rusqlite::Result<_>>()?;
-        Ok(Stats { decisions, trade_signals, jev_cost_usd, briefs, research_cost_usd, live_orders, live_usd, buckets })
+        Ok(Stats {
+            decisions,
+            trade_signals,
+            jev_cost_usd,
+            briefs,
+            research_cost_usd,
+            live_orders,
+            live_usd,
+            buckets,
+            calibration: self.calibration()?,
+            live_pnl: self.pnl(false)?,
+            dry_run_pnl: self.pnl(true)?,
+        })
     }
+}
+
+/// Brier scores and hit rates overall and per group. Groups without decisions are left out.
+pub fn calibrate(rows: &[Resolved]) -> Calibration {
+    let edge = |r: &Resolved| match r.best_side().1 {
+        e if e < 0.0 => 0,
+        e if e < 0.04 => 1,
+        e if e < 0.08 => 2,
+        e if e < 0.15 => 3,
+        _ => 4,
+    };
+    let answerable = |r: &Resolved| match r.answerable {
+        a if a < 0.5 => 0,
+        a if a < 0.7 => 1,
+        a if a < 0.85 => 2,
+        _ => 3,
+    };
+    Calibration {
+        all: group(rows, "all", |_| true),
+        by_variant: grouped(rows, &["jev sees price", "jev blind"], |r| usize::from(!r.saw_price)),
+        by_edge: grouped(rows, &["< 0", "0 to 0.04", "0.04 to 0.08", "0.08 to 0.15", ">= 0.15"], edge),
+        by_answerable: grouped(rows, &["< 0.50", "0.50 to 0.70", "0.70 to 0.85", ">= 0.85"], answerable),
+        by_clarity: grouped(rows, &["0", "1", "2", "3", "4"], |r| usize::from(r.clarity.min(4))),
+    }
+}
+
+fn grouped(rows: &[Resolved], labels: &[&str], key: impl Fn(&Resolved) -> usize) -> Vec<Group> {
+    labels.iter().enumerate().map(|(i, label)| group(rows, label, |r| key(r) == i)).filter(|g| g.n > 0).collect()
+}
+
+fn group(rows: &[Resolved], label: &str, member: impl Fn(&Resolved) -> bool) -> Group {
+    let (mut n, mut hits, mut jev, mut market) = (0, 0.0, 0.0, 0.0);
+    for r in rows.iter().filter(|r| member(r)) {
+        n += 1;
+        hits += if r.best_side().0 { r.yes_price } else { 1.0 - r.yes_price };
+        jev += (r.p_yes - r.yes_price).powi(2);
+        market += (r.midpoint - r.yes_price).powi(2);
+    }
+    let mean = |sum: f64| if n == 0 { 0.0 } else { sum / n as f64 };
+    Group { label: label.to_owned(), n, hit_rate: mean(hits), brier_jev: mean(jev), brier_market: mean(market) }
 }
 
 fn now() -> f64 {
@@ -271,9 +483,9 @@ mod tests {
         assert!(st.get_brief("slug", 3600.0).unwrap().is_none());
         let brief =
             Brief { summary: "s".into(), sources: vec!["u".into()], model: "m".into(), cost: 0.01, ..Brief::default() };
-        st.put_brief("slug", &brief).unwrap();
-        let hit = st.get_brief("slug", 3600.0).unwrap().unwrap();
-        assert_eq!((hit.summary.as_str(), hit.sources.len(), hit.cost), ("s", 1, 0.0));
+        st.put_brief("slug", &brief, Some(0.42)).unwrap();
+        let (hit, midpoint) = st.get_brief("slug", 3600.0).unwrap().unwrap();
+        assert_eq!((hit.summary.as_str(), hit.sources.len(), hit.cost, midpoint), ("s", 1, 0.0, Some(0.42)));
 
         st.conn.execute("UPDATE research SET ts = ?1", [now() - 7200.0]).unwrap();
         assert!(st.get_brief("slug", 3600.0).unwrap().is_none(), "expired");
@@ -290,8 +502,8 @@ mod tests {
             condition_id: "c1",
             question: "Q?",
             state: &state,
-            p_yes: 0.6,
-            answerable: 0.9,
+            p_yes: Some(0.6),
+            answerable: Some(0.9),
             clarity: 3,
             yes_ask: Some(0.51),
             no_ask: Some(0.5),
@@ -339,5 +551,107 @@ mod tests {
         assert_eq!((s.decisions, s.trade_signals, s.live_orders, s.live_usd), (1, 1, 1, 5.0));
         assert_eq!(s.buckets.len(), 1);
         assert_eq!(s.buckets[0].bucket, 6);
+    }
+
+    #[test]
+    fn adds_midpoint_column_to_old_research_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE research (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, slug TEXT NOT NULL,
+                 model TEXT, brief_json TEXT NOT NULL, cost REAL);
+                 INSERT INTO research (ts, slug, brief_json) VALUES (1e12, 'old', '{\"summary\":\"s\"}');",
+            )
+            .unwrap();
+        let st = Store::open(&path).unwrap();
+        let (brief, midpoint) = st.get_brief("old", 3600.0).unwrap().unwrap();
+        assert_eq!((brief.summary.as_str(), midpoint), ("s", None));
+        drop(st);
+        Store::open(&path).unwrap();
+    }
+
+    fn decide(st: &Store, condition_id: &str, p_yes: f64, midpoint: f64, state: Value) {
+        st.log_decision(&DecisionRow {
+            slug: condition_id,
+            condition_id,
+            question: "Q?",
+            state: &state,
+            p_yes: Some(p_yes),
+            answerable: Some(0.9),
+            clarity: 3,
+            yes_ask: Some(midpoint + 0.01),
+            no_ask: Some(1.0 - midpoint + 0.01),
+            midpoint: Some(midpoint),
+            edge: None,
+            action: "skip",
+            reason: "",
+            jev_model: None,
+            jev_cost: 0.0,
+            research_cost: None,
+            raw: &Value::Null,
+        })
+        .unwrap();
+    }
+
+    fn resolve(st: &Store, condition_id: &str, yes_price: f64) {
+        let r =
+            Resolution { condition_id: condition_id.into(), slug: condition_id.into(), yes_price, resolved_at: None };
+        st.put_resolution(&r).unwrap();
+    }
+
+    #[test]
+    fn calibration_uses_latest_decision_per_resolved_market() {
+        let (_dir, st) = store();
+        let seen = json!({"market_implied_probability_yes": 0.5});
+        decide(&st, "c1", 0.2, 0.5, seen.clone());
+        decide(&st, "c1", 0.9, 0.5, seen);
+        decide(&st, "c2", 0.3, 0.6, json!({}));
+        decide(&st, "open", 0.5, 0.5, json!({}));
+        assert_eq!(st.unresolved_condition_ids().unwrap().len(), 3);
+        resolve(&st, "c1", 1.0);
+        resolve(&st, "c2", 0.0);
+        assert_eq!(st.unresolved_condition_ids().unwrap(), ["open"]);
+
+        let c = st.calibration().unwrap();
+        assert_eq!(c.all.n, 2);
+        assert_eq!(c.all.hit_rate, 1.0, "YES at 0.9 won, NO at 0.7 won");
+        assert!((c.all.brier_jev - (0.01 + 0.09) / 2.0).abs() < 1e-9, "only the latest c1 decision counts");
+        assert!((c.all.brier_market - (0.25 + 0.36) / 2.0).abs() < 1e-9);
+        let variants: Vec<_> = c.by_variant.iter().map(|g| (g.label.as_str(), g.n)).collect();
+        assert_eq!(variants, [("jev sees price", 1), ("jev blind", 1)]);
+    }
+
+    #[test]
+    fn pnl_splits_live_and_dry_run() {
+        let (_dir, st) = store();
+        let order = |condition_id, outcome, dry_run| OrderRow {
+            slug: "s",
+            condition_id,
+            token_id: "t",
+            outcome,
+            price: 0.4,
+            size: 10.0,
+            usd: 4.0,
+            status: if dry_run { "dry_run" } else { "live" },
+            dry_run,
+            ..OrderRow::default()
+        };
+        st.log_order(&order("won", "YES", false)).unwrap();
+        st.log_order(&order("lost", "NO", false)).unwrap();
+        st.log_order(&order("open", "YES", false)).unwrap();
+        st.log_order(&OrderRow { status: "rejected", ..order("won", "YES", false) }).unwrap();
+        st.log_order(&order("won", "NO", true)).unwrap();
+        resolve(&st, "won", 1.0);
+        resolve(&st, "lost", 1.0);
+
+        let live = st.pnl(false).unwrap();
+        assert_eq!(
+            (live.orders, live.resolved, live.staked_usd, live.payout_usd, live.pnl_usd),
+            (3, 2, 8.0, 10.0, 2.0)
+        );
+        let dry = st.pnl(true).unwrap();
+        assert_eq!((dry.orders, dry.resolved, dry.pnl_usd), (1, 1, -4.0));
     }
 }

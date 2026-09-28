@@ -16,6 +16,7 @@ use serde_json::{Map, Value, json};
 use crate::config::Settings;
 use crate::research::Brief;
 use crate::signal::Book;
+use crate::store::{Resolution, Store};
 
 const PAGE_SIZE: i32 = 50;
 
@@ -77,6 +78,21 @@ impl TryFrom<&gamma::types::response::Market> for Market {
 pub struct Candidate {
     pub market: Market,
     pub book: Book,
+}
+
+impl Candidate {
+    /// How much a brief on this market could pay off, for ranking research targets. Zero when
+    /// neither ask sits in the trade band (no trade is possible); otherwise higher the sooner it
+    /// resolves (evidence ages less, capital returns sooner) and the thinner the book (deep
+    /// books are priced by many traders already).
+    pub fn opportunity(&self, s: &Settings) -> f64 {
+        let band = s.min_trade_price..=s.max_trade_price;
+        if ![self.book.yes_ask, self.book.no_ask].into_iter().flatten().any(|ask| band.contains(&ask)) {
+            return 0.0;
+        }
+        let days = self.market.days_to_resolution().unwrap_or(s.max_days_to_resolution) as f64;
+        1.0 / (1.0 + days / 30.0) / (1.0 + self.market.liquidity / 100_000.0)
+    }
 }
 
 fn f(x: Option<Decimal>) -> Option<f64> {
@@ -165,7 +181,9 @@ async fn fetch_books(clob: &clob::Client, markets: &[Market]) -> Vec<Option<Book
     }
 }
 
-/// Walk the most-traded open markets and keep those passing filters with a live book.
+/// Walk the most-traded open markets, keep those passing filters with a live book, and return
+/// the `limit` with the best [`Candidate::opportunity`]. All `pages` are walked so the ranking
+/// sees every candidate; the books come in one request per page.
 pub async fn scan(
     gamma: &gamma::Client,
     clob: &clob::Client,
@@ -204,15 +222,53 @@ pub async fn scan(
                 continue;
             }
             out.push(Candidate { market, book });
-            if out.len() >= limit {
-                return Ok(out);
-            }
         }
         if listed.len() < PAGE_SIZE as usize {
             break;
         }
     }
+    // Stable: equal scores keep the volume order.
+    out.sort_by(|a, b| b.opportunity(s).total_cmp(&a.opportunity(s)));
+    out.truncate(limit);
     Ok(out)
+}
+
+/// Fetch and store the outcomes of every decided or ordered market without one yet.
+/// Returns how many were new.
+pub async fn update_resolutions(gamma: &gamma::Client, store: &Store) -> Result<usize> {
+    let pending = store.unresolved_condition_ids()?;
+    let resolved = fetch_resolutions(gamma, &pending).await?;
+    for r in &resolved {
+        store.put_resolution(r)?;
+    }
+    Ok(resolved.len())
+}
+
+/// Resolutions of the given markets that have closed with a final price. Markets still open
+/// or awaiting their outcome are left out. One request per 50 markets.
+pub async fn fetch_resolutions(gamma: &gamma::Client, condition_ids: &[String]) -> Result<Vec<Resolution>> {
+    let mut out = Vec::new();
+    for chunk in condition_ids.chunks(PAGE_SIZE as usize) {
+        let ids = chunk.iter().filter_map(|id| id.parse().ok()).collect();
+        let request = MarketsRequest::builder().condition_ids(ids).closed(true).limit(PAGE_SIZE).build();
+        let markets = gamma.markets(&request).await.context("fetching resolved markets")?;
+        out.extend(markets.iter().filter_map(resolution));
+    }
+    Ok(out)
+}
+
+/// A closed market's outcome: a YES price of exactly 0 or 1, or any price once UMA marks the
+/// market resolved (50-50 splits). A closed market at 0.9995 is still waiting for its outcome.
+fn resolution(m: &gamma::types::response::Market) -> Option<Resolution> {
+    let condition_id = m.condition_id?.to_string();
+    let yes_price = m.outcome_prices.as_deref()?.first()?.to_f64()?;
+    let settled = yes_price == 0.0 || yes_price == 1.0 || m.uma_resolution_status.as_deref() == Some("resolved");
+    (m.closed == Some(true) && settled).then(|| Resolution {
+        condition_id,
+        slug: m.slug.clone().unwrap_or_default(),
+        yes_price,
+        resolved_at: m.closed_time.clone(),
+    })
 }
 
 /// Market slug from a slug or a polymarket.com URL (`/event/<event>[/<market>]`, `/market/<slug>`).
@@ -278,7 +334,9 @@ pub fn build_state(c: &Candidate, s: &Settings, brief: Option<&Brief>) -> Value 
     if let Some(src) = &m.resolution_source {
         state.insert("resolution_source".into(), json!(src));
     }
-    if let Some(mid) = c.book.midpoint() {
+    if s.jev_sees_market_price
+        && let Some(mid) = c.book.midpoint()
+    {
         state.insert("market_implied_probability_yes".into(), json!((mid * 100.0).round() / 100.0));
     }
     if let Some(b) = brief {
@@ -301,9 +359,96 @@ fn truncate_words(text: &str, max_chars: usize) -> String {
     }
 }
 
+/// A market resolving in `days` with a 2-cent YES spread and a matching NO ask.
+#[cfg(test)]
+pub fn test_candidate(yes_ask: f64, days: i64, liquidity: f64) -> Candidate {
+    let market = Market {
+        slug: "m".into(),
+        question: "Q?".into(),
+        description: String::new(),
+        condition_id: String::new(),
+        end_date: Some(Utc::now() + Duration::days(days) + Duration::hours(1)),
+        resolution_source: None,
+        yes_token: U256::from(1),
+        no_token: U256::from(2),
+        liquidity,
+        volume: 0.0,
+        tick_size: 0.01,
+        min_order_size: 5.0,
+    };
+    let book = Book {
+        yes_token_id: market.yes_token,
+        no_token_id: market.no_token,
+        yes_bid: Some(yes_ask - 0.02),
+        yes_ask: Some(yes_ask),
+        no_ask: Some(1.02 - yes_ask),
+        tick_size: 0.01,
+        min_order_size: 5.0,
+    };
+    Candidate { market, book }
+}
+
 #[cfg(test)]
 mod tests {
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+
+    #[test]
+    fn opportunity_prefers_tradable_soon_and_thin() {
+        let s = Settings::default();
+        let score = |yes_ask, days, liquidity| test_candidate(yes_ask, days, liquidity).opportunity(&s);
+        assert_eq!(score(0.96, 3, 10_000.0), 0.0, "both asks outside the trade band");
+        assert!(score(0.5, 3, 20_000.0) > score(0.5, 40, 20_000.0), "sooner resolution first");
+        assert!(score(0.5, 10, 20_000.0) > score(0.5, 10, 2_000_000.0), "thin book first");
+        assert!(score(0.85, 50, 2_000_000.0) > 0.0);
+    }
+
+    #[test]
+    fn market_price_in_state_is_switchable() {
+        let c = test_candidate(0.5, 10, 20_000.0);
+        let seen = build_state(&c, &Settings::default(), None);
+        assert_eq!(seen["market_implied_probability_yes"], 0.49);
+        let blind = build_state(&c, &Settings { jev_sees_market_price: false, ..Settings::default() }, None);
+        assert!(blind.get("market_implied_probability_yes").is_none());
+    }
+
+    #[tokio::test]
+    async fn fetches_only_settled_resolutions() {
+        let server = MockServer::start().await;
+        let id = |n: u8| format!("0x{}", format!("{n:02x}").repeat(32));
+        let market = |n: u8, prices: &str, extra: Value| {
+            let mut m = json!({"id": n.to_string(), "conditionId": id(n), "slug": format!("m{n}"), "closed": true,
+                               "outcomes": "[\"Yes\", \"No\"]", "outcomePrices": prices,
+                               "closedTime": "2026-09-20 12:00:00+00"});
+            m.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            m
+        };
+        let body = json!([
+            market(1, "[\"1\", \"0\"]", json!({})),
+            market(2, "[\"0.9995\", \"0.0005\"]", json!({})),
+            market(3, "[\"0.5\", \"0.5\"]", json!({"umaResolutionStatus": "resolved"})),
+            market(4, "[\"0\", \"1\"]", json!({"closed": false})),
+        ]);
+        Mock::given(method("GET"))
+            .and(path("/markets"))
+            .and(query_param("closed", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gamma = gamma::Client::new(&server.uri()).unwrap();
+        let ids: Vec<String> = (1..=4).map(id).collect();
+        let got = fetch_resolutions(&gamma, &ids).await.unwrap();
+
+        let prices: Vec<_> = got.iter().map(|r| (r.slug.as_str(), r.yes_price)).collect();
+        assert_eq!(prices, [("m1", 1.0), ("m3", 0.5)]);
+        assert_eq!(got[0].condition_id, id(1));
+        assert_eq!(got[0].resolved_at.as_deref(), Some("2026-09-20 12:00:00+00"));
+        let query = server.received_requests().await.unwrap()[0].url.query().unwrap_or_default().to_owned();
+        assert_eq!(query.matches("condition_ids=").count(), 4, "{query}");
+    }
 
     #[test]
     fn parses_market_refs() {

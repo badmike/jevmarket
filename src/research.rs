@@ -9,6 +9,7 @@
 use std::cell::Cell;
 use std::time::Duration;
 
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -49,26 +50,37 @@ Rules:
 - Quote resolution-relevant numbers, names, deadlines and official statements exactly.
 - Report the most recent development you can find and its date.
 - Give considerations for and against a YES resolution as short factual bullets — not opinions.
+- List scheduled events before the market end date that could settle the question (votes, rulings,
+  releases, deadlines, matches), with their dates.
+- Report what the stated resolution source itself currently shows or says, if it can be checked.
 - Do NOT estimate a probability, do NOT say what you would bet, do NOT summarize market odds.
 - If you find nothing relevant, say so plainly in `summary`.
 - Output strictly one JSON object, no prose around it, with exactly these keys:
   {
     "as_of": "YYYY-MM-DD (date of the newest fact you found)",
     "summary": "2-4 sentences: current status relevant to resolution",
-    "key_facts": ["YYYY-MM-DD: fact", ...],           // 3-8 items
+    "key_facts": ["YYYY-MM-DD: fact", ...],           // 3-8 items, newest first
     "latest_development": "YYYY-MM-DD: what happened most recently",
+    "scheduled_events": ["YYYY-MM-DD: event", ...],   // 0-5 items, soonest first
+    "resolution_source_status": "what the resolution source currently shows, or \"not checkable\"",
     "for_yes": ["short factual point", ...],           // 0-5 items
     "against_yes": ["short factual point", ...],       // 0-5 items
     "sources": ["https://...", ...]
   }"#;
 
-/// The evidence brief. Serialized form is what the research cache stores.
+/// The evidence brief. Serialized form is what the research cache stores; missing fields
+/// default, so briefs cached by older versions still load.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Brief {
     pub summary: String,
+    /// Newest first.
     pub key_facts: Vec<String>,
     pub latest_development: String,
+    /// Dated events before the end date that could settle the question, soonest first.
+    pub scheduled_events: Vec<String>,
+    /// What the named resolution source currently shows.
+    pub resolution_source_status: String,
     pub as_of: String,
     pub for_yes: Vec<String>,
     pub against_yes: Vec<String>,
@@ -103,6 +115,8 @@ impl Brief {
             summary: text("summary"),
             key_facts: list("key_facts"),
             latest_development: text("latest_development"),
+            scheduled_events: list("scheduled_events"),
+            resolution_source_status: text("resolution_source_status"),
             as_of: text("as_of"),
             for_yes: list("for_yes"),
             against_yes: list("against_yes"),
@@ -113,33 +127,51 @@ impl Brief {
     }
 
     /// Compact evidence block for the Jev state. Sources, model and cost are noise to Jev.
+    ///
+    /// When over `max_chars`, trims in this order: considerations for and against YES (balanced,
+    /// so trimming never tilts the evidence), the oldest key facts, the latest scheduled events,
+    /// and as a last resort the free-text fields.
     pub fn to_state(&self, max_chars: usize) -> Value {
-        let mut key_facts = self.key_facts.clone();
-        let mut for_yes = self.for_yes.clone();
-        let mut against_yes = self.against_yes.clone();
-        let mut summary = self.summary.clone();
-        let build = |summary: &str, key_facts: &[String], for_yes: &[String], against_yes: &[String]| {
-            json!({
-                "as_of": self.as_of,
-                "summary": summary,
-                "key_facts": key_facts,
-                "latest_development": self.latest_development,
-                "considerations_for_yes": for_yes,
-                "considerations_against_yes": against_yes,
-            })
-        };
-        // Trim list fields from the tail until the block fits, then the summary as a last resort.
+        let mut b = self.clone();
+        // Dated facts newest first, undated last, whatever order the model used.
+        b.key_facts.sort_by_key(|f| std::cmp::Reverse(fact_date(f)));
         loop {
-            let ev = build(&summary, &key_facts, &for_yes, &against_yes);
+            let ev = b.evidence();
             if ev.to_string().len() <= max_chars {
                 return ev;
             }
-            if against_yes.pop().is_none() && for_yes.pop().is_none() && key_facts.pop().is_none() {
-                summary = summary.chars().take(max_chars.saturating_sub(400)).collect();
-                return build(&summary, &key_facts, &for_yes, &against_yes);
+            let longer = if b.for_yes.len() > b.against_yes.len() { &mut b.for_yes } else { &mut b.against_yes };
+            if longer.pop().is_none() && b.key_facts.pop().is_none() && b.scheduled_events.pop().is_none() {
+                let keep = max_chars.saturating_sub(400) / 2;
+                b.summary = b.summary.chars().take(keep).collect();
+                b.resolution_source_status = b.resolution_source_status.chars().take(keep).collect();
+                return b.evidence();
             }
         }
     }
+
+    fn evidence(&self) -> Value {
+        let mut ev = json!({
+            "as_of": self.as_of,
+            "summary": self.summary,
+            "key_facts": self.key_facts,
+            "latest_development": self.latest_development,
+        });
+        if !self.scheduled_events.is_empty() {
+            ev["scheduled_events"] = json!(self.scheduled_events);
+        }
+        if !self.resolution_source_status.is_empty() {
+            ev["resolution_source_status"] = json!(self.resolution_source_status);
+        }
+        ev["considerations_for_yes"] = json!(self.for_yes);
+        ev["considerations_against_yes"] = json!(self.against_yes);
+        ev
+    }
+}
+
+/// Date prefix of a `YYYY-MM-DD: fact` line.
+fn fact_date(fact: &str) -> Option<NaiveDate> {
+    fact.get(..10).and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
 }
 
 /// What the researcher needs to know about a market.
@@ -398,9 +430,53 @@ mod tests {
     }
 
     #[test]
+    fn to_state_trims_considerations_balanced_before_facts() {
+        let mut data = brief_json().as_object().unwrap().clone();
+        let points = |side: &str| (0..5).map(|i| format!("{side} point {i} {}", "x".repeat(80))).collect::<Vec<_>>();
+        data["for_yes"] = json!(points("for"));
+        data["against_yes"] = json!(points("against"));
+        let full = Brief::from_json(&data, "", 0.0).to_state(usize::MAX).to_string().len();
+        let ev = Brief::from_json(&data, "", 0.0).to_state(full - 400);
+        let len = |k: &str| ev[k].as_array().unwrap().len();
+        let (for_yes, against_yes) = (len("considerations_for_yes"), len("considerations_against_yes"));
+        assert!(for_yes + against_yes < 10, "something was trimmed");
+        assert!(for_yes.abs_diff(against_yes) <= 1, "for={for_yes} against={against_yes}");
+        assert_eq!(len("key_facts"), 2, "facts survive while considerations remain");
+    }
+
+    #[test]
+    fn to_state_drops_oldest_fact_first() {
+        let mut data = brief_json().as_object().unwrap().clone();
+        // Out of order on purpose: the oldest must go first regardless.
+        data["key_facts"] = json!(["2026-09-10: old", "undated: rumor", "2026-09-19: new", "2026-09-15: mid"]);
+        data["for_yes"] = json!([]);
+        data["against_yes"] = json!([]);
+        let b = Brief::from_json(&data, "", 0.0);
+        let full = b.to_state(usize::MAX);
+        assert_eq!(full["key_facts"][0], "2026-09-19: new");
+        let ev = b.to_state(full.to_string().len() - 1);
+        assert_eq!(ev["key_facts"], json!(["2026-09-19: new", "2026-09-15: mid", "2026-09-10: old"]));
+    }
+
+    #[test]
     fn cache_roundtrip() {
-        let b = Brief::from_json(brief_json().as_object().unwrap(), "m", 0.01);
+        let mut data = brief_json().as_object().unwrap().clone();
+        data.insert("scheduled_events".into(), json!(["2026-09-30: UN vote"]));
+        data.insert("resolution_source_status".into(), json!("No announcement yet."));
+        let b = Brief::from_json(&data, "m", 0.01);
+        assert_eq!(b.scheduled_events, ["2026-09-30: UN vote"]);
         let back: Brief = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
         assert_eq!(back, b);
+        let ev = b.to_state(2500);
+        assert_eq!(ev["resolution_source_status"], "No announcement yet.");
+    }
+
+    #[test]
+    fn briefs_cached_before_new_fields_still_load() {
+        let old = r#"{"summary":"s","key_facts":["2026-09-01: f"],"latest_development":"","as_of":"2026-09-01",
+            "for_yes":[],"against_yes":[],"sources":[],"model":"m","cost":0.01}"#;
+        let b: Brief = serde_json::from_str(old).unwrap();
+        assert!(b.scheduled_events.is_empty() && b.resolution_source_status.is_empty());
+        assert!(b.to_state(2500).get("scheduled_events").is_none());
     }
 }

@@ -5,6 +5,13 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 ## [Unreleased]
 
+- ✨ Add `resolve` and fetch market outcomes at the start of every `run` pass; `stats` now reports Brier scores, hit rates by edge, answerable and clarity, and live and dry-run PnL
+- 🐛 Trim brief considerations for and against YES in turn; before, every point against YES was dropped before any point for it
+- ✨ Research a cached brief again before trading on it or once the midpoint moved more than `research_max_price_move`, and skip edges above `suspicious_edge`
+- ⚡️ Pre-screen clarity with one cheap Jev call before paying for research, and rank candidates by opportunity instead of 24h volume
+- ✨ Ask the researcher for scheduled events and the current state of the resolution source; `research_max_results` now defaults to 8
+- ✨ Add `jev_sees_market_price` to compare Jev with and without the market price in its state
+- ✨ Add `jevmarket daemon`: the trading loop plus a live web console for markets, briefings, positions, stats and settings; a live daemon starts paused until resumed in the console
 - ✨ Add `jevmarket init`, a guided setup for OpenRouter, models, the Polymarket wallet and risk limits, with live checks
 - 🔒 Create the config file with owner-only permissions before writing keys to it
 - 🎉 Port jevymarket to Rust as a single `jevmarket` binary with the same commands, prompts, math and SQLite schema

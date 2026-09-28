@@ -41,6 +41,9 @@ pub struct Settings {
 
     // --- Jev ----------------------------------------------------------------
     pub jev_model: String,
+    /// Put the market midpoint into the Jev state as `market_implied_probability_yes`.
+    /// `stats` compares Brier scores of both variants.
+    pub jev_sees_market_price: bool,
 
     // --- researcher (generative model + web search via OpenRouter) ---------
     pub research_enabled: bool,
@@ -57,6 +60,8 @@ pub struct Settings {
     pub research_exclude_domains: Vec<String>,
     /// Markets researched and priced in parallel during `run`.
     pub concurrency: usize,
+    /// A cached brief is researched again once the midpoint moved more than this since it was written.
+    pub research_max_price_move: f64,
 
     // --- signal thresholds --------------------------------------------------
     /// `P_jev - best ask` required to trade.
@@ -69,6 +74,9 @@ pub struct Settings {
     /// extremes, so "edge" on 5-cent longshots is usually the model being wrong, not the market.
     pub min_trade_price: f64,
     pub max_trade_price: f64,
+    /// Edges above this are more likely a model error than a mispricing: logged, and skipped
+    /// unless a fresh brief brings them back below.
+    pub suspicious_edge: f64,
 
     // --- market filter ------------------------------------------------------
     pub min_liquidity_usd: f64,
@@ -104,19 +112,22 @@ impl Default for Settings {
             clob_host: "https://clob.polymarket.com".into(),
             polygon_rpc_url: "https://polygon-rpc.com".into(),
             jev_model: "typesafe/jev-1.13".into(),
+            jev_sees_market_price: true,
             research_enabled: true,
             research_model: "deepseek/deepseek-v4-pro-0813".into(),
             research_ttl_hours: 6.0,
             max_research_per_run: 20,
-            research_max_results: 5,
+            research_max_results: 8,
             research_max_chars: 2500,
             research_exclude_domains: DEFAULT_EXCLUDE_DOMAINS.map(String::from).to_vec(),
             concurrency: 4,
+            research_max_price_move: 0.05,
             min_edge: 0.08,
             min_answerable: 0.70,
             min_clarity: 2,
             min_trade_price: 0.10,
             max_trade_price: 0.90,
+            suspicious_edge: 0.25,
             min_liquidity_usd: 5_000.0,
             min_volume_usd: 10_000.0,
             max_days_to_resolution: 60,

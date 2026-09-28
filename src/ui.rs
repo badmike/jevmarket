@@ -62,6 +62,12 @@ pub fn print_brief(b: &Brief, cached: bool, full: bool) {
     if !b.latest_development.is_empty() {
         println!("    latest: {}", b.latest_development);
     }
+    for event in &b.scheduled_events {
+        println!("    {} {event}", style("scheduled:").cyan());
+    }
+    if !b.resolution_source_status.is_empty() {
+        println!("    resolution source: {}", b.resolution_source_status);
+    }
     if !b.for_yes.is_empty() {
         println!("    {} {}", style("for YES:").green(), b.for_yes.join(" | "));
     }
@@ -71,6 +77,10 @@ pub fn print_brief(b: &Brief, cached: bool, full: bool) {
     for url in b.sources.iter().take(8) {
         println!("    {}", style(url).dim());
     }
+}
+
+pub fn print_unclear(c: &Candidate, reason: &str) {
+    println!("{}", style(format!("{}: skip: {reason}", c.market.slug)).dim());
 }
 
 pub fn print_decision(c: &Candidate, a: &Assessment, verdict: &Verdict) {

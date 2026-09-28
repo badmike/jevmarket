@@ -49,6 +49,19 @@ static QUESTIONS: LazyLock<Questions> = LazyLock::new(|| {
     ])
 });
 
+/// Only the clarity question, for the pre-screen before research is paid for.
+static CLARITY_ONLY: LazyLock<Questions> =
+    LazyLock::new(|| IndexMap::from([("clarity", QUESTIONS["clarity"].clone())]));
+
+/// Jev's clarity rating of a market, from [`ask_clarity`].
+#[derive(Debug, Clone)]
+pub struct ClarityView {
+    pub clarity: u8,
+    pub model: Option<String>,
+    pub cost: f64,
+    pub raw: Value,
+}
+
 #[derive(Debug, Clone)]
 pub struct JevView {
     pub p_yes: f64,
@@ -138,6 +151,16 @@ pub async fn ask_jev(jev: &JevClient, state: &Value) -> Result<JevView, OpenRout
             raw,
         }),
         _ => Err(OpenRouterError::invalid("Jev", format!("unexpected answer shape: {raw}"))),
+    }
+}
+
+/// Ask Jev only how clear the resolution criteria are. The criteria do not depend on the
+/// evidence, so this runs on the state without a brief, before paying for one.
+pub async fn ask_clarity(jev: &JevClient, state: &Value) -> Result<ClarityView, OpenRouterError> {
+    let (d, raw) = jev.decide(state, &CLARITY_ONLY).await?;
+    match d.answer("clarity").score() {
+        Some(clarity) => Ok(ClarityView { clarity, model: d.model, cost: d.usage.cost, raw }),
+        None => Err(OpenRouterError::invalid("Jev", format!("unexpected answer shape: {raw}"))),
     }
 }
 
