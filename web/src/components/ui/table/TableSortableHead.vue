@@ -58,7 +58,7 @@ const toggle = () => {
       <Icon
         :name="isActive && sortBy.direction === 'desc' ? 'lucide:arrow-down' : 'lucide:arrow-up'"
         size="12"
-        class="transition-opacity"
+        class="shrink-0 transition-opacity"
         :class="
           isActive
             ? 'opacity-100'

@@ -12,6 +12,9 @@ import type {
   RecommendationDetail,
   StatsView,
   Status,
+  Transfer,
+  WalletKind,
+  Wallets,
 } from '~/api/types'
 
 /** A non-2xx answer, with the server's message, and the confirmation it wants, if any. */
@@ -73,8 +76,12 @@ export const api = {
   brief: (id: number) => get<BriefRecord>(`briefs/${id}`),
   orders: () => get<OrderEvent[]>('orders'),
   positions: () => get<Positions>('positions'),
+  wallets: () => get<Wallets>('wallets'),
+  /** `amountUsd` null moves everything. */
+  transfer: (from: WalletKind, amountUsd: number | null) =>
+    json<Transfer>('POST', 'transfer', { from, amount_usd: amountUsd }),
   stats: () => get<StatsView>('stats'),
-  runPass: (confirm?: string) => send('pass', { confirm }),
+  runPass: () => send('pass'),
   pause: () => send('loop/pause'),
   resume: (confirm?: string) => send('loop/resume', { confirm }),
   decide: (reference: string, fresh = false) =>

@@ -2,9 +2,9 @@
 import { useNow } from '@vueuse/core'
 
 import type { BriefRecord } from '~/api/types'
+import BriefStatus from '~/components/BriefStatus.vue'
 import Icon from '~/components/Icon.vue'
-import { Badge } from '~/components/ui/badge'
-import { SimpleTooltip } from '~/components/ui/tooltip'
+import { Alert } from '~/components/ui/alert'
 import { ago, at, datedLine, hostname, points, prob, usd } from '~/lib/format'
 
 const props = defineProps<{
@@ -14,10 +14,35 @@ const props = defineProps<{
 }>()
 
 const now = useNow({ interval: 30_000 })
+const nowSecs = computed(() => now.value.getTime() / 1000)
 const brief = computed(() => props.record.brief)
-const facts = computed(() => brief.value.key_facts.map(datedLine))
-const events = computed(() => brief.value.scheduled_events.map(datedLine))
 const latest = computed(() => datedLine(brief.value.latest_development))
+
+/** Key facts newest first, grouped under their date; undated facts come last. */
+const timeline = computed(() => {
+  const groups = new Map<string | null, string[]>()
+  const sorted = brief.value.key_facts
+    .map(datedLine)
+    .toSorted((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
+  for (const { date, text } of sorted) groups.set(date, [...(groups.get(date) ?? []), text])
+  return [...groups].map(([date, items]) => ({ date, items }))
+})
+
+const events = computed(() =>
+  brief.value.scheduled_events
+    .map(datedLine)
+    .toSorted((a, b) => (a.date ?? '￿').localeCompare(b.date ?? '￿'))
+    .map((e) => ({ ...e, when: e.date ? ago(Date.parse(`${e.date}T00:00:00`) / 1000, nowSecs.value) : null }))
+)
+
+const sources = computed(() =>
+  brief.value.sources.map((url) => ({ url, host: hostname(url), path: url.replace(/^https?:\/\/[^/]+/, '') }))
+)
+
+const sides = computed(() => [
+  { title: 'For YES', icon: 'lucide:thumbs-up', tone: 'text-success', points: brief.value.for_yes },
+  { title: 'Against YES', icon: 'lucide:thumbs-down', tone: 'text-destructive', points: brief.value.against_yes },
+])
 
 const move = computed(() => {
   const { midpoint_then: before, midpoint_now: current } = props.record
@@ -28,161 +53,154 @@ const move = computed(() => {
 </script>
 
 <template>
-  <article class="grid gap-6">
-    <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted">
-      <SimpleTooltip
-        :tooltip="
-          record.fresh
-            ? 'Inside research_ttl_hours: passes reuse this brief'
-            : 'Older than research_ttl_hours: the next decision researches again'
-        "
-        as-child
-      >
-        <Badge
-          :variant="record.fresh ? 'success' : 'warning'"
-          size="sm"
+  <article class="@container grid gap-8">
+    <div class="grid gap-4">
+      <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
+        <BriefStatus
+          :fresh="record.fresh"
+          :settled="record.settled"
           tabindex="0"
-        >
-          {{ record.fresh ? 'Fresh' : 'Expired' }}
-        </Badge>
-      </SimpleTooltip>
-      <SimpleTooltip
+        />
+        <span :title="at(record.ts)">Researched {{ ago(record.ts, nowSecs) }}</span>
+        <span aria-hidden="true">·</span>
+        <span>facts as of {{ brief.as_of || 'unknown' }}</span>
+        <template v-if="move">
+          <span aria-hidden="true">·</span>
+          <span
+            v-if="move.delta"
+            class="tabular-nums"
+          >
+            Midpoint {{ prob(move.before) }} then, {{ prob(move.current) }} now
+          </span>
+          <span
+            v-else
+            class="tabular-nums"
+          >
+            Midpoint {{ prob(move.current) }}, unchanged
+          </span>
+        </template>
+      </div>
+
+      <Alert
         v-if="move?.stale"
-        :tooltip="`The midpoint moved more than ${points(maxMove)} since this was written: the market has likely seen news the brief lacks`"
-        as-child
+        color="warning"
+        icon="lucide:triangle-alert"
+        class="text-sm"
       >
-        <Badge
-          variant="warning"
-          size="sm"
-          tabindex="0"
-        >
-          Price moved
-        </Badge>
-      </SimpleTooltip>
-      <span>Facts as of {{ brief.as_of || 'unknown' }}</span>
-      <span :title="at(record.ts)">Researched {{ ago(record.ts, now.getTime() / 1000) }}</span>
-      <span v-if="brief.model">{{ brief.model }}</span>
-      <span class="tabular-nums">{{ usd(record.cost, true) }}</span>
-      <span
-        v-if="move"
-        class="tabular-nums"
-      >
-        Midpoint {{ prob(move.before) }} then, {{ prob(move.current) }} now ({{ points(move.delta) }})
-      </span>
+        The midpoint moved {{ points(move.delta) }} since this brief was written, more than the
+        {{ points(maxMove) }} limit. The market has likely seen news the brief lacks.
+      </Alert>
+
+      <p class="max-w-prose text-lg text-pretty text-primary">
+        {{ brief.summary || 'The researcher found nothing relevant.' }}
+      </p>
     </div>
 
-    <p class="max-w-prose text-base text-primary">
-      {{ brief.summary || 'The researcher found nothing relevant.' }}
-    </p>
-
-    <div
-      v-if="brief.resolution_source_status || brief.latest_development"
-      class="grid gap-3 sm:grid-cols-2"
+    <dl
+      v-if="brief.latest_development || brief.resolution_source_status"
+      class="grid gap-x-6 gap-y-4 @lg:grid-cols-2"
     >
-      <section
-        v-if="brief.resolution_source_status"
-        class="rounded-lg bg-muted-background/60 p-3"
-      >
-        <h3 class="mb-1 text-xs font-semibold text-muted">Resolution source</h3>
-        <p class="text-sm">{{ brief.resolution_source_status }}</p>
-      </section>
-      <section
+      <div
         v-if="brief.latest_development"
-        class="rounded-lg bg-muted-background/60 p-3"
+        class="grid content-start gap-1"
       >
-        <h3 class="mb-1 text-xs font-semibold text-muted">
+        <dt class="text-xs font-medium text-muted">
           Latest development<template v-if="latest.date">, {{ latest.date }}</template>
-        </h3>
-        <p class="text-sm">{{ latest.text }}</p>
-      </section>
-    </div>
+        </dt>
+        <dd class="text-sm text-primary">{{ latest.text }}</dd>
+      </div>
+      <div
+        v-if="brief.resolution_source_status"
+        class="grid content-start gap-1"
+      >
+        <dt class="text-xs font-medium text-muted">Resolution source</dt>
+        <dd class="text-sm text-primary">{{ brief.resolution_source_status }}</dd>
+      </div>
+    </dl>
 
-    <section v-if="events.length">
-      <h3 class="mb-2 text-sm font-semibold text-primary">Scheduled before the end date</h3>
-      <ol class="grid gap-1.5">
+    <section
+      v-if="events.length"
+      class="grid gap-3"
+    >
+      <h3 class="text-sm font-semibold text-primary">Coming up</h3>
+      <ol class="grid gap-2">
         <li
           v-for="(e, i) in events"
           :key="i"
-          class="grid grid-cols-[6.5rem_1fr] gap-3 text-sm"
+          class="flex gap-3 rounded-lg bg-muted-background/50 px-3 py-2 text-sm"
         >
-          <span class="flex items-start gap-1.5 text-muted tabular-nums">
-            <Icon
-              name="lucide:calendar-clock"
-              size="14"
-              class="mt-0.5 shrink-0"
-              aria-hidden="true"
-            />
-            {{ e.date ?? 'Undated' }}
-          </span>
-          <span>{{ e.text }}</span>
+          <Icon
+            name="lucide:calendar-clock"
+            size="14"
+            class="mt-0.75 shrink-0 text-muted"
+            aria-hidden="true"
+          />
+          <div class="grid min-w-0 gap-0.5">
+            <span class="text-primary">{{ e.text }}</span>
+            <span class="text-xs text-muted tabular-nums">
+              {{ e.date ?? 'Undated' }}<template v-if="e.when">, {{ e.when }}</template>
+            </span>
+          </div>
         </li>
       </ol>
     </section>
 
-    <section v-if="facts.length">
-      <h3 class="mb-2 text-sm font-semibold text-primary">Key facts</h3>
-      <ol class="relative grid gap-3 border-l border-border pl-4">
+    <section
+      v-if="timeline.length"
+      class="grid gap-3"
+    >
+      <h3 class="text-sm font-semibold text-primary">Key facts</h3>
+      <ol class="grid gap-4">
         <li
-          v-for="(f, i) in facts"
-          :key="i"
-          class="relative text-sm"
+          v-for="group in timeline"
+          :key="group.date ?? 'undated'"
+          class="group/fact grid grid-cols-[auto_1fr] gap-x-3"
         >
           <span
-            class="absolute top-1.5 -left-[1.3rem] size-2 rounded-full border-2 border-background bg-border-strong"
+            class="mt-1 size-2 rounded-full bg-border-strong"
             aria-hidden="true"
           />
-          <span class="block text-xs text-muted tabular-nums">{{ f.date ?? 'Undated' }}</span>
-          {{ f.text }}
+          <span class="text-xs font-medium text-muted tabular-nums">{{ group.date ?? 'Undated' }}</span>
+          <span
+            class="mx-auto mt-1.5 -mb-3 w-px bg-border group-last/fact:mb-0"
+            aria-hidden="true"
+          />
+          <ul class="mt-1 grid gap-2">
+            <li
+              v-for="(text, i) in group.items"
+              :key="i"
+              class="text-sm text-primary"
+            >
+              {{ text }}
+            </li>
+          </ul>
         </li>
       </ol>
     </section>
 
-    <div class="grid gap-3 sm:grid-cols-2">
-      <section class="rounded-lg border border-border p-3">
-        <h3 class="mb-2 flex items-center gap-1.5 text-sm font-semibold text-primary">
+    <div class="grid gap-6 @lg:grid-cols-2">
+      <section
+        v-for="side in sides"
+        :key="side.title"
+        class="grid content-start gap-3"
+      >
+        <h3 class="flex items-center gap-1.5 text-sm font-semibold text-primary">
           <Icon
-            name="lucide:thumbs-up"
+            :name="side.icon"
             size="14"
-            class="text-success"
+            :class="side.tone"
             aria-hidden="true"
           />
-          For YES
+          {{ side.title }}
         </h3>
         <ul
-          v-if="brief.for_yes.length"
-          class="grid list-disc gap-1 pl-4 text-sm"
+          v-if="side.points.length"
+          class="grid gap-2 text-sm text-primary"
         >
           <li
-            v-for="(point, i) in brief.for_yes"
+            v-for="(point, i) in side.points"
             :key="i"
-          >
-            {{ point }}
-          </li>
-        </ul>
-        <p
-          v-else
-          class="text-sm text-muted"
-        >
-          Nothing reported.
-        </p>
-      </section>
-      <section class="rounded-lg border border-border p-3">
-        <h3 class="mb-2 flex items-center gap-1.5 text-sm font-semibold text-primary">
-          <Icon
-            name="lucide:thumbs-down"
-            size="14"
-            class="text-destructive"
-            aria-hidden="true"
-          />
-          Against YES
-        </h3>
-        <ul
-          v-if="brief.against_yes.length"
-          class="grid list-disc gap-1 pl-4 text-sm"
-        >
-          <li
-            v-for="(point, i) in brief.against_yes"
-            :key="i"
+            class="border-l-2 border-border pl-3"
           >
             {{ point }}
           </li>
@@ -196,31 +214,41 @@ const move = computed(() => {
       </section>
     </div>
 
-    <section v-if="brief.sources.length">
-      <h3 class="mb-2 text-sm font-semibold text-primary">Sources</h3>
-      <ul class="grid gap-1">
+    <section
+      v-if="sources.length"
+      class="grid gap-2"
+    >
+      <h3 class="text-sm font-semibold text-primary">Sources</h3>
+      <ul class="grid gap-0.5">
         <li
-          v-for="url in brief.sources"
-          :key="url"
+          v-for="s in sources"
+          :key="s.url"
           class="min-w-0"
         >
           <a
-            :href="url"
+            :href="s.url"
             target="_blank"
             rel="noopener noreferrer"
-            class="group inline-flex max-w-full items-center gap-1.5 text-sm text-accent hover:underline"
+            class="group -mx-2 flex min-w-0 items-center gap-2 rounded-md px-2 py-1 text-sm transition-colors hover:bg-secondary/60"
           >
+            <span class="shrink-0 font-medium text-primary group-hover:text-accent">{{ s.host }}</span>
+            <span class="min-w-0 truncate text-xs text-muted">{{ s.path }}</span>
             <Icon
-              name="lucide:external-link"
+              name="lucide:arrow-up-right"
               size="12"
-              class="shrink-0"
+              class="ml-auto shrink-0 text-muted group-hover:text-accent"
               aria-hidden="true"
             />
-            <span class="font-medium">{{ hostname(url) }}</span>
-            <span class="truncate text-muted">{{ url.replace(/^https?:\/\/[^/]+/, '') }}</span>
           </a>
         </li>
       </ul>
     </section>
+
+    <p
+      v-if="brief.model || record.cost"
+      class="text-xs text-muted"
+    >
+      Written by {{ brief.model || 'an unknown model' }} for <span class="tabular-nums">{{ usd(record.cost, true) }}</span>
+    </p>
   </article>
 </template>

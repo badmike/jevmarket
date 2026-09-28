@@ -18,7 +18,7 @@ export interface ActivityItem {
 export type Connection = 'connecting' | 'open' | 'reconnecting'
 
 /** Reconnect delays double from one second up to this. */
-const MAX_BACKOFF_MS = 30_000
+const MAX_BACKOFF_MS = 10_000
 const MAX_ACTIVITY = 200
 
 const ACTIVITY_TYPES = new Set<Event['type']>([
@@ -52,6 +52,8 @@ const useLiveBase = () => {
   const touched = ref(new Set<string>())
 
   let source: EventSource | null = null
+  /** The daemon build this page was loaded from; another one means stale code and asset names. */
+  let build: string | null = null
   let attempt = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let nextId = 0
@@ -71,6 +73,15 @@ const useLiveBase = () => {
   }
 
   const resync = async () => {
+    const status = await api.status().catch(() => null)
+    if (status) {
+      if (build !== null && status.build !== build) {
+        window.location.reload()
+        return
+      }
+      build = status.build
+      client.setQueryData(keys.status, status)
+    }
     await client.invalidateQueries()
     try {
       const recent = (await api.activity()).filter(isActivity)
@@ -107,6 +118,7 @@ const useLiveBase = () => {
         break
       case 'positions_changed':
         void client.invalidateQueries({ queryKey: keys.positions })
+        void client.invalidateQueries({ queryKey: keys.wallets })
         void client.invalidateQueries({ queryKey: keys.orders })
         break
       case 'stats_changed':
@@ -153,10 +165,26 @@ const useLiveBase = () => {
     connect()
   }
 
+  /** Back from sleep, a hidden tab or a network change: try now instead of waiting out the backoff. */
+  const retrySoon = () => {
+    if (connection.value !== 'open') reconnect()
+  }
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') retrySoon()
+  }
+  /** A lazy route chunk of an older build is gone from the server: load the current build. */
+  const onPreloadError = () => window.location.reload()
+
   connect()
+  window.addEventListener('online', retrySoon)
+  document.addEventListener('visibilitychange', onVisible)
+  window.addEventListener('vite:preloadError', onPreloadError)
   onScopeDispose(() => {
     clearTimeout(timer)
     source?.close()
+    window.removeEventListener('online', retrySoon)
+    document.removeEventListener('visibilitychange', onVisible)
+    window.removeEventListener('vite:preloadError', onPreloadError)
   })
 
   return {

@@ -2,7 +2,8 @@ import { useEventListener } from '@vueuse/core'
 
 import { navigation } from '~/router'
 
-const typing = (target: EventTarget | null): boolean =>
+/** Focus is in a text field: single-key shortcuts must not fire. */
+export const typing = (target: EventTarget | null): boolean =>
   target instanceof HTMLElement &&
   (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
 

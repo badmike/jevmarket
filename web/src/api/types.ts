@@ -27,6 +27,8 @@ export interface Pass {
 
 export interface Status {
   version: string
+  /** Fingerprint of the embedded console; the page reloads when it changes. */
+  build: string
   started_at: number
   state: LoopState
   loop_secs: number
@@ -35,6 +37,7 @@ export interface Status {
   dry_run_forced: boolean
   pass: Pass | null
   last_pass: Pass | null
+  /** All time, as logged in the database, plus everything since the daemon started. */
   spend_total: Spend
   last_error: string | null
 }
@@ -71,6 +74,8 @@ export interface Recommendation {
   trade: Trade | null
   jev_cost: number
   research_cost: number | null
+  /** The market resolved or its end date passed. */
+  settled: boolean
 }
 
 export interface Brief {
@@ -96,6 +101,8 @@ export interface BriefRecord {
   fresh: boolean
   midpoint_then: number | null
   midpoint_now: number | null
+  /** The market resolved or its end date passed. */
+  settled: boolean
   brief: Brief
 }
 
@@ -109,6 +116,7 @@ export interface BriefSummary {
   model: string
   cost: number
   fresh: boolean
+  settled: boolean
   facts: number
   sources: number
 }
@@ -157,6 +165,31 @@ export interface Positions {
   positions: Position[]
   open_orders: OpenOrder[]
   exposure: Exposure
+}
+
+export type WalletKind = 'deposit' | 'proxy'
+
+export interface WalletState {
+  address: string
+  balance_usd: number
+}
+
+/** The key's two wallets, read on-chain. */
+export interface Wallets {
+  signer: string
+  /** Places the bot's orders. */
+  deposit: WalletState
+  /** The polymarket.com account. */
+  proxy: WalletState
+  /** Config entries that disagree with the wallets derived from the key. */
+  warnings: string[]
+}
+
+export interface Transfer {
+  from: WalletKind
+  to: WalletKind
+  amount_usd: number
+  tx_hash: string
 }
 
 export interface OrderEvent {

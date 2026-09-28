@@ -65,7 +65,7 @@ const shares = computed(() =>
 const live = computed(() => status.value?.dry_run === false)
 
 const submit = async () => {
-  if (!valid.value) return
+  if (!valid.value || busy.value) return
   busy.value = true
   error.value = null
   const order = {

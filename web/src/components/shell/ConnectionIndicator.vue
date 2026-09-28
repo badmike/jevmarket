@@ -17,16 +17,17 @@ const label = computed(() => {
 
 const tooltip = computed(() =>
   connection.value === 'open'
-    ? 'Receiving live updates from the daemon'
-    : 'Not receiving updates. Click to reconnect now.'
+    ? 'Live: receiving updates from the daemon'
+    : `${label.value}: not receiving updates. Click to reconnect now.`
 )
 </script>
 
 <template>
   <SimpleTooltip
     :tooltip="tooltip"
-    class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs font-medium text-muted transition-colors hover:bg-secondary/80"
+    class="flex size-8 cursor-pointer items-center justify-center rounded-md transition-colors hover:bg-secondary/80"
     :aria-label="`Live updates: ${label}`"
+    aria-live="polite"
     @click="connection !== 'open' && reconnect()"
   >
     <PulseDot
@@ -34,11 +35,5 @@ const tooltip = computed(() =>
       :variant="connection === 'open' ? 'success' : connection === 'connecting' ? 'default' : 'destructive'"
       :live="connection === 'open'"
     />
-    <span
-      class="hidden @lg:inline"
-      aria-live="polite"
-    >
-      {{ label }}
-    </span>
   </SimpleTooltip>
 </template>

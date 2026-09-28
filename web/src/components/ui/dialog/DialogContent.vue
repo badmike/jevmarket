@@ -43,7 +43,15 @@ const delegatedProps = computed(() => {
   return delegated
 })
 
-const forwarded = useForwardPropsEmits(delegatedProps, emits)
+const forwardedAll = useForwardPropsEmits(delegatedProps, emits)
+/**
+ * `submit` is this component's own shortcut event. Forwarded, it would land on the element as a
+ * native submit listener and fire again for every form submitted inside the dialog.
+ */
+const forwarded = computed(() => {
+  const { onSubmit: _onSubmit, ...rest } = forwardedAll.value
+  return rest
+})
 
 // The listener lives on the content, so only the open dialog sees the chord.
 const onKeydown = (event: KeyboardEvent) => {

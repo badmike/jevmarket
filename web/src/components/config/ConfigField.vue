@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { FieldMeta } from '~/components/config/fields'
+import Icon from '~/components/Icon.vue'
 import { Button } from '~/components/ui/button'
 import { Input } from '~/components/ui/input'
 import { Switch } from '~/components/ui/switch'
@@ -14,6 +15,9 @@ const props = defineProps<{
   /** The draft as it would read with the built-in default. */
   defaultDraft: string | boolean | null
   dirty: boolean
+  saving: boolean
+  /** Saved a moment ago. */
+  saved: boolean
   error?: string
   /** An environment variable overrides this key. */
   fromEnv: boolean
@@ -22,7 +26,12 @@ const props = defineProps<{
 }>()
 
 const model = defineModel<string | boolean>({ required: true })
-defineEmits<{ reset: []; clear: [] }>()
+const emit = defineEmits<{ reset: []; clear: []; commit: [] }>()
+
+/** Enter saves like leaving the field does. */
+const blurOnEnter = (event: KeyboardEvent) => {
+  if (event.target instanceof HTMLElement) event.target.blur()
+}
 
 const id = computed(() => `setting-${props.name}`)
 const describedBy = computed(() =>
@@ -31,6 +40,9 @@ const describedBy = computed(() =>
     .join(' ') || undefined
 )
 const atDefault = computed(() => props.defaultDraft === null || model.value === props.defaultDraft)
+/** Secrets reset by clearing the stored value, everything else back to its default. */
+const resettable = computed(() => (props.kind === 'secret' ? !!props.isSet : !atDefault.value))
+const reset = () => (props.kind === 'secret' ? emit('clear') : emit('reset'))
 const defaultText = computed(() => {
   const d = props.defaultDraft
   if (d === null || props.kind === 'list') return null
@@ -42,18 +54,43 @@ const defaultText = computed(() => {
 <template>
   <div class="grid gap-2 py-4 first:pt-0 last:pb-0 md:grid-cols-[minmax(0,1fr)_minmax(0,22rem)] md:gap-6">
     <div class="grid content-start gap-1">
-      <label
-        :for="id"
-        class="flex items-center gap-2 text-sm font-medium text-primary"
-      >
-        {{ meta.label }}
+      <div class="group flex min-h-7 items-center gap-2">
+        <label
+          :for="id"
+          class="text-sm font-medium text-primary"
+        >
+          {{ meta.label }}
+        </label>
+        <Button
+          v-if="resettable"
+          variant="ghost"
+          size="toolbar"
+          :aria-label="kind === 'secret' ? `Clear ${meta.label}` : `Reset ${meta.label} to its default`"
+          :title="kind === 'secret' ? 'Clear' : 'Reset to default'"
+          class="text-muted hover:text-primary"
+          @click="reset"
+        >
+          <Icon name="lucide:undo-2" />
+        </Button>
         <span
-          v-if="dirty"
+          v-if="saving || dirty"
           class="size-1.5 rounded-full bg-accent"
-          aria-label="unsaved"
+          :class="saving && 'animate-pulse'"
+          :aria-label="saving ? 'saving' : 'unsaved'"
         />
-      </label>
-      <p class="font-mono text-2xs text-muted">{{ name }}</p>
+        <Icon
+          v-else-if="saved"
+          name="lucide:check"
+          size="14"
+          class="text-success"
+          aria-label="saved"
+        />
+        <code
+          class="font-mono text-2xs text-muted opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+        >
+          {{ name }}
+        </code>
+      </div>
       <p
         :id="`${id}-help`"
         class="text-sm text-muted"
@@ -77,7 +114,12 @@ const defaultText = computed(() => {
           :id="id"
           :model-value="model === true"
           :aria-describedby="describedBy"
-          @update:model-value="model = $event"
+          @update:model-value="
+            (on: boolean) => {
+              model = on
+              emit('commit')
+            }
+          "
         />
         <Textarea
           v-else-if="kind === 'list'"
@@ -88,6 +130,7 @@ const defaultText = computed(() => {
           :aria-invalid="!!error"
           spellcheck="false"
           @update:model-value="model = String($event)"
+          @blur="emit('commit')"
         />
         <Input
           v-else
@@ -103,23 +146,9 @@ const defaultText = computed(() => {
           spellcheck="false"
           class="tabular-nums"
           @update:model-value="model = String($event)"
+          @blur="emit('commit')"
+          @keydown.enter.prevent="blurOnEnter"
         />
-        <Button
-          v-if="kind !== 'secret' && !atDefault"
-          variant="ghost"
-          size="xs"
-          @click="$emit('reset')"
-        >
-          Default
-        </Button>
-        <Button
-          v-if="kind === 'secret' && isSet"
-          variant="ghost"
-          size="xs"
-          @click="$emit('clear')"
-        >
-          Clear
-        </Button>
       </div>
       <p
         v-if="error"

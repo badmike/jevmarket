@@ -21,7 +21,7 @@ const tooltip = computed(() => {
     as-child
   >
     <Badge
-      :variant="status.dry_run ? 'secondary' : 'destructive'"
+      :variant="status.dry_run ? 'secondary' : 'success'"
       size="sm"
       class="gap-1"
       tabindex="0"

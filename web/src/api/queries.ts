@@ -12,6 +12,7 @@ export const keys = {
   briefs: ['briefs'],
   brief: (id: number) => ['briefs', id],
   positions: ['positions'],
+  wallets: ['wallets'],
   orders: ['orders'],
   stats: ['stats'],
 } as const
@@ -42,6 +43,10 @@ export const useBrief = (id: MaybeRefOrGetter<number | null>) =>
 /** Reads the wallet from Polymarket: slower, so it stays fresh for a minute. */
 export const usePositions = () =>
   useQuery({ queryKey: keys.positions, queryFn: api.positions, staleTime: 60_000 })
+
+/** Reads both wallets on-chain: slower, so it stays fresh for a minute. */
+export const useWallets = () =>
+  useQuery({ queryKey: keys.wallets, queryFn: api.wallets, staleTime: 60_000 })
 
 export const useOrders = () => useQuery({ queryKey: keys.orders, queryFn: api.orders })
 

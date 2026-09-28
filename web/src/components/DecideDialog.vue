@@ -25,7 +25,7 @@ const busy = ref(false)
 const error = ref<string | null>(null)
 
 const submit = async () => {
-  if (!reference.value.trim()) return
+  if (!reference.value.trim() || busy.value) return
   busy.value = true
   error.value = null
   try {

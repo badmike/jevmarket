@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { prob } from '~/lib/format'
+import { percent } from '~/lib/format'
 
 /** One value on the 0 to 1 scale, with an optional threshold tick. */
 defineProps<{
@@ -32,9 +32,9 @@ defineProps<{
         v-if="threshold != null"
         class="absolute -top-1 h-4 w-0.5 rounded bg-primary/60"
         :style="{ left: `${threshold * 100}%` }"
-        :title="`Threshold ${prob(threshold)}`"
+        :title="`Threshold ${percent(threshold)}`"
       />
     </div>
-    <span class="text-right font-semibold text-primary tabular-nums">{{ prob(value) }}</span>
+    <span class="text-right font-semibold text-primary tabular-nums">{{ percent(value) }}</span>
   </div>
 </template>

@@ -5,24 +5,27 @@ import { useLive } from '~/api/live'
 import { useRecommendations } from '~/api/queries'
 import type { Recommendation } from '~/api/types'
 import DecideDialog from '~/components/DecideDialog.vue'
+import Icon from '~/components/Icon.vue'
+import MarketVerdict from '~/components/MarketVerdict.vue'
 import QueryError from '~/components/QueryError.vue'
 import RecommendationSheet from '~/components/RecommendationSheet.vue'
-import VerdictBadge from '~/components/VerdictBadge.vue'
+import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Input } from '~/components/ui/input'
 import {
   Table,
   TableBody,
   TableCell,
-  TableHead,
   TableHeader,
   TableRow,
   TableSortableHead,
 } from '~/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import TableLoadingRow from '~/components/ui/TableLoadingRow.vue'
+import { useReadState } from '~/composables/useReadState'
 import { useThresholds } from '~/composables/useSettings'
-import { ago, points, prob } from '~/lib/format'
+import { ago, percent, points } from '~/lib/format'
 import type { TableSort } from '~/lib/table'
 
 type Filter = 'all' | 'trade' | 'skip'
@@ -31,11 +34,15 @@ const route = useRoute()
 const router = useRouter()
 const { data, error, isPending, refetch } = useRecommendations()
 const { touched } = useLive()
+const { isRead, markRead } = useReadState('markets')
 const limits = useThresholds()
 const now = useNow({ interval: 30_000 })
 
 const search = ref('')
 const filter = ref<Filter>('all')
+/** Settled markets (resolved or past their end date) are history, kept out of the way. */
+const view = ref<'open' | 'settled'>('open')
+const inView = computed(() => (data.value ?? []).filter((r) => r.settled === (view.value === 'settled')))
 const sort = ref<TableSort>({ column: 'edge', direction: 'desc' })
 
 const selected = computed(() => (typeof route.params.slug === 'string' ? route.params.slug : null))
@@ -51,20 +58,68 @@ const columns: Record<string, (r: Recommendation) => number> = {
   ts: (r) => r.ts,
 }
 
+const edgeNeeded = computed(() => `${Math.round(limits.value.minEdge * 100)} points`)
+
+/** Column headers in table order, each with a one-line explanation for newcomers. */
+const heads = computed(() => {
+  const { minAnswerable, minClarity } = limits.value
+  return [
+    { column: 'question', label: 'Market', hint: '', class: 'w-full min-w-64', align: 'start' as const },
+    { column: 'p_yes', label: 'Jev', hint: 'How likely Jev, the AI model, thinks YES is.' },
+    {
+      column: 'midpoint',
+      label: 'Price',
+      hint: 'What YES costs on the market, roughly how likely traders think YES is.',
+    },
+    {
+      column: 'edge',
+      label: 'Edge',
+      hint: `How far Jev's estimate beats the price on the better side, YES or NO. The bot needs ${edgeNeeded.value}.`,
+    },
+    {
+      column: 'answerable',
+      label: 'Answerable',
+      hint: `How sure Jev is that public information can settle the question today. The bot needs ${percent(minAnswerable)}.`,
+    },
+    {
+      column: 'clarity',
+      label: 'Clarity',
+      hint: `How clear the market's rules are, from 0 to 4. The bot needs ${minClarity}.`,
+    },
+    {
+      column: 'verdict',
+      label: 'Verdict',
+      hint: 'What the bot did and why. Hover a verdict for the technical reason.',
+      align: 'start' as const,
+    },
+    { column: 'ts', label: 'Updated', hint: 'When Jev last looked at the market.' },
+  ].map((h) => ({ align: 'end' as const, ...h, sortable: h.column in columns }))
+})
+
 const rows = computed(() => {
   const q = search.value.trim().toLowerCase()
   const key = columns[sort.value.column] ?? columns.ts!
   const dir = sort.value.direction === 'asc' ? 1 : -1
-  return (data.value ?? [])
+  return inView.value
     .filter((r) => filter.value === 'all' || (filter.value === 'trade') === isTrade(r))
     .filter((r) => !q || r.question.toLowerCase().includes(q) || r.slug.includes(q))
     .toSorted((a, b) => (key(a) - key(b)) * dir)
 })
 
+const unread = computed(() => rows.value.filter((r) => !isRead(r.slug, r.ts)))
+const markAllRead = () => markRead(unread.value.map((r) => ({ key: r.slug, ts: r.ts })))
+
 const counts = computed(() => {
-  const all = data.value ?? []
+  const all = inView.value
   const trade = all.filter(isTrade).length
-  return { all: all.length, trade, skip: all.length - trade }
+  const settled = (data.value ?? []).filter((r) => r.settled).length
+  return { all: all.length, trade, skip: all.length - trade, open: (data.value?.length ?? 0) - settled, settled }
+})
+
+const emptyMessage = computed(() => {
+  if (search.value.trim()) return 'No market matches your search.'
+  if (!inView.value.length) return view.value === 'open' ? 'No open markets right now.' : 'No settled markets yet.'
+  return filter.value === 'trade' ? 'No trades here yet.' : 'Nothing skipped here.'
 })
 </script>
 
@@ -78,6 +133,33 @@ const counts = computed(() => {
       <DecideDialog />
     </header>
 
+    <details class="group text-sm">
+      <summary class="inline-flex cursor-pointer items-center gap-1 text-muted hover:text-primary">
+        <Icon
+          name="lucide:chevron-right"
+          class="transition-transform group-open:rotate-90"
+          aria-hidden="true"
+        />
+        How to read this
+      </summary>
+      <div class="mt-2 grid gap-3 rounded-lg bg-muted-background/60 p-3">
+        <p>
+          Jev, an AI model, reads the news on each market and estimates how likely YES is. The bot compares that to
+          the price and buys YES or NO when Jev's estimate is at least {{ edgeNeeded }} better and the
+          question is answerable and clear enough. Everything else is skipped.
+        </p>
+        <dl class="grid gap-x-6 gap-y-2 sm:grid-cols-2">
+          <div
+            v-for="h in heads.filter((h) => h.hint)"
+            :key="h.column"
+          >
+            <dt class="mr-1 inline font-semibold text-primary">{{ h.label }}:</dt>
+            <dd class="inline text-muted">{{ h.hint }}</dd>
+          </div>
+        </dl>
+      </div>
+    </details>
+
     <div class="flex flex-wrap items-center gap-2">
       <Input
         v-model="search"
@@ -86,6 +168,12 @@ const counts = computed(() => {
         aria-label="Search markets"
         class="max-w-xs"
       />
+      <Tabs v-model="view">
+        <TabsList aria-label="Open or settled markets">
+          <TabsTrigger value="open">Open {{ counts.open }}</TabsTrigger>
+          <TabsTrigger value="settled">Settled {{ counts.settled }}</TabsTrigger>
+        </TabsList>
+      </Tabs>
       <Tabs v-model="filter">
         <TabsList aria-label="Filter by verdict">
           <TabsTrigger value="all">All {{ counts.all }}</TabsTrigger>
@@ -93,6 +181,16 @@ const counts = computed(() => {
           <TabsTrigger value="skip">Skip {{ counts.skip }}</TabsTrigger>
         </TabsList>
       </Tabs>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="ml-auto text-muted"
+        :disabled="!unread.length"
+        @click="markAllRead"
+      >
+        <Icon name="lucide:check-check" />
+        Mark all read
+      </Button>
     </div>
 
     <QueryError
@@ -112,44 +210,30 @@ const counts = computed(() => {
     >
       <TableHeader>
         <TableRow>
-          <TableHead class="w-full min-w-64">Market</TableHead>
           <TableSortableHead
+            v-for="h in heads"
+            :key="h.column"
             v-model="sort"
-            column="p_yes"
-            align="end"
+            :column="h.column"
+            :sortable="h.sortable"
+            :align="h.align"
+            :class="[h.class, !h.sortable && h.align === 'end' && 'text-right']"
           >
-            Jev
-          </TableSortableHead>
-          <TableHead class="text-right">Market</TableHead>
-          <TableSortableHead
-            v-model="sort"
-            column="edge"
-            align="end"
-          >
-            Edge
-          </TableSortableHead>
-          <TableSortableHead
-            v-model="sort"
-            column="answerable"
-            align="end"
-          >
-            Answerable
-          </TableSortableHead>
-          <TableHead class="text-right">Clarity</TableHead>
-          <TableHead>Verdict</TableHead>
-          <TableSortableHead
-            v-model="sort"
-            column="ts"
-            align="end"
-          >
-            Updated
+            <SimpleTooltip
+              v-if="h.hint"
+              :tooltip="h.hint"
+              as-child
+            >
+              <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">{{ h.label }}</span>
+            </SimpleTooltip>
+            <template v-else>{{ h.label }}</template>
           </TableSortableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         <TableLoadingRow
           v-if="isPending"
-          :colspan="8"
+          :colspan="heads.length"
           :rows="8"
         />
         <TableRow
@@ -157,7 +241,12 @@ const counts = computed(() => {
           v-else
           :key="r.slug"
           class="cursor-pointer"
-          :class="touched.has(r.slug) && 'bg-accent/10'"
+          :class="[
+            touched.has(r.slug) && 'bg-accent/10',
+            r.slug !== selected &&
+              isRead(r.slug, r.ts) &&
+              'opacity-60 focus-within:opacity-100 hover:opacity-100',
+          ]"
           :data-state="r.slug === selected ? 'selected' : undefined"
           @click="open(r.slug)"
         >
@@ -176,14 +265,14 @@ const counts = computed(() => {
             labelled
             class="text-right tabular-nums"
           >
-            {{ prob(r.p_yes) }}
+            {{ percent(r.p_yes) }}
           </TableCell>
           <TableCell
-            label="Market"
+            label="Price"
             labelled
             class="text-right text-muted tabular-nums"
           >
-            {{ prob(r.midpoint) }}
+            {{ percent(r.midpoint) }}
           </TableCell>
           <TableCell
             label="Edge"
@@ -200,21 +289,19 @@ const counts = computed(() => {
             class="text-right tabular-nums"
             :class="r.answerable != null && r.answerable < limits.minAnswerable && 'text-muted'"
           >
-            {{ prob(r.answerable) }}
+            {{ percent(r.answerable) }}
           </TableCell>
           <TableCell
             label="Clarity"
             labelled
-            class="text-right tabular-nums"
+            class="text-right whitespace-nowrap tabular-nums"
             :class="r.clarity != null && r.clarity < limits.minClarity && 'text-muted'"
           >
-            {{ r.clarity ?? '–' }}
+            <template v-if="r.clarity != null">{{ r.clarity }}<span class="text-xs text-muted">/4</span></template>
+            <template v-else>–</template>
           </TableCell>
           <TableCell label="Verdict">
-            <VerdictBadge
-              :action="r.action"
-              :title="r.reason"
-            />
+            <MarketVerdict :recommendation="r" />
           </TableCell>
           <TableCell
             label="Updated"
@@ -225,10 +312,10 @@ const counts = computed(() => {
         </TableRow>
         <TableRow v-if="!isPending && !rows.length">
           <TableCell
-            :colspan="8"
+            :colspan="heads.length"
             class="py-10 text-center text-sm text-muted"
           >
-            No market matches.
+            {{ emptyMessage }}
           </TableCell>
         </TableRow>
       </TableBody>

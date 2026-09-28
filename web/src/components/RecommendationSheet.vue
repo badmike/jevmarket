@@ -4,6 +4,7 @@ import { toast } from 'vue-sonner'
 import { api, errorMessage } from '~/api/client'
 import { useRecommendation } from '~/api/queries'
 import BriefView from '~/components/BriefView.vue'
+import { verdictSentence } from '~/components/MarketVerdict.vue'
 import Icon from '~/components/Icon.vue'
 import OrderDialog from '~/components/OrderDialog.vue'
 import OrderStatus from '~/components/OrderStatus.vue'
@@ -14,6 +15,7 @@ import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
+import { useReadState } from '~/composables/useReadState'
 import { useThresholds } from '~/composables/useSettings'
 import { at, points, prob, usd } from '~/lib/format'
 
@@ -23,6 +25,16 @@ const emit = defineEmits<{ close: [] }>()
 const { data, error, isPending, refetch } = useRecommendation(() => props.slug)
 const limits = useThresholds()
 const busy = ref<'decide' | 'brief' | null>(null)
+const { markRead } = useReadState('markets')
+
+/** Opening a market marks its decision read, and so does a newer one arriving while it is open. */
+watch(
+  [() => data.value?.slug, () => data.value?.ts],
+  ([key, ts]) => {
+    if (key && ts != null) markRead([{ key, ts }])
+  },
+  { immediate: true }
+)
 
 /** Focus the sheet itself on open, not its first link (the Polymarket page). */
 const focusSheet = (event: Event) => {
@@ -125,9 +137,10 @@ const act = async (kind: 'decide' | 'brief') => {
         />
         <template v-else-if="data">
           <section class="grid gap-3">
+            <p class="text-base text-primary">{{ verdictSentence(data, limits.minEdge) }}</p>
             <div class="flex flex-wrap items-center gap-2">
               <VerdictBadge :action="data.action" />
-              <p class="text-sm break-words">{{ data.reason }}</p>
+              <p class="text-xs break-words text-muted">{{ data.reason }}</p>
             </div>
             <div
               v-if="data.trade"
@@ -158,12 +171,12 @@ const act = async (kind: 'decide' | 'brief') => {
               class="grid gap-2.5"
             >
               <ProbabilityBar
-                label="Jev P(YES)"
+                label="Jev on YES"
                 :value="data.p_yes"
                 :series="1"
               />
               <ProbabilityBar
-                label="Market midpoint"
+                label="Market price"
                 :value="data.midpoint"
                 :series="2"
               />

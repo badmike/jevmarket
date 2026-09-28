@@ -98,12 +98,12 @@ const progress = computed(() => {
                 : 'Passes place real orders'
           "
         >
-          <span :class="!status.dry_run && 'text-destructive'">{{ status.dry_run ? 'Dry run' : 'Live' }}</span>
+          <span :class="!status.dry_run && 'text-success'">{{ status.dry_run ? 'Dry run' : 'Live' }}</span>
         </StatTile>
         <StatTile
           title="OpenRouter spend"
           icon="lucide:coins"
-          :detail="`${status.spend_total.jev_calls} Jev calls, ${status.spend_total.briefs} briefs since ${ago(status.started_at, seconds)}`"
+          :detail="`${status.spend_total.jev_calls} Jev calls, ${status.spend_total.briefs} briefs, all time`"
         >
           {{ usd(total(status.spend_total), true) }}
         </StatTile>
