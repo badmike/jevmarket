@@ -134,7 +134,56 @@ pub struct Trade {
 #[derive(Debug, Clone)]
 pub enum Verdict {
     Trade(Trade),
-    Skip(String),
+    Skip(Skip),
+}
+
+impl Verdict {
+    fn skip(code: SkipCode, reason: impl Into<String>) -> Self {
+        Self::Skip(Skip { code, reason: reason.into() })
+    }
+}
+
+/// Why a market was not traded: a code the console can explain, and the detail for the log.
+#[derive(Debug, Clone)]
+pub struct Skip {
+    pub code: SkipCode,
+    pub reason: String,
+}
+
+/// Stored in `decisions.skip_code`; `web/src/api/types.ts` lists the same codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipCode {
+    /// The resolution rules are too vague (also the pre-screen before research).
+    Unclear,
+    /// Jev lacks the information to judge the question.
+    Unanswerable,
+    NoAsks,
+    /// Both asks lie outside `min_trade_price..=max_trade_price`.
+    OutsideBand,
+    SmallEdge,
+    /// An edge above `suspicious_edge`: more likely a model error.
+    SuspiciousEdge,
+    ZeroStake,
+    /// The exchange's minimum order would exceed the per-trade cap.
+    MinOrderTooBig,
+    /// A trade signal on a cached brief that could not be researched again.
+    StaleBrief,
+}
+
+impl SkipCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unclear => "unclear",
+            Self::Unanswerable => "unanswerable",
+            Self::NoAsks => "no_asks",
+            Self::OutsideBand => "outside_band",
+            Self::SmallEdge => "small_edge",
+            Self::SuspiciousEdge => "suspicious_edge",
+            Self::ZeroStake => "zero_stake",
+            Self::MinOrderTooBig => "min_order_too_big",
+            Self::StaleBrief => "stale_brief",
+        }
+    }
 }
 
 pub async fn ask_jev(jev: &JevClient, state: &Value) -> Result<JevView, OpenRouterError> {
@@ -184,10 +233,13 @@ pub fn kelly_fraction(p: f64, price: f64) -> f64 {
 
 pub fn evaluate(view: &JevView, book: &Book, s: &Settings) -> Verdict {
     if view.answerable < s.min_answerable {
-        return Verdict::Skip(format!("answerable {:.2} < {}", view.answerable, s.min_answerable));
+        return Verdict::skip(
+            SkipCode::Unanswerable,
+            format!("answerable {:.2} < {}", view.answerable, s.min_answerable),
+        );
     }
     if view.clarity < s.min_clarity {
-        return Verdict::Skip(format!("clarity {} < {}", view.clarity, s.min_clarity));
+        return Verdict::skip(SkipCode::Unclear, format!("clarity {} < {}", view.clarity, s.min_clarity));
     }
 
     let sides: Vec<(Outcome, U256, f64, f64)> = [
@@ -198,33 +250,37 @@ pub fn evaluate(view: &JevView, book: &Book, s: &Settings) -> Verdict {
     .flatten()
     .collect();
     if sides.is_empty() {
-        return Verdict::Skip("no asks on either side".into());
+        return Verdict::skip(SkipCode::NoAsks, "no asks on either side");
     }
     let in_band = sides.iter().filter(|(.., ask)| (s.min_trade_price..=s.max_trade_price).contains(ask));
     let Some(&(outcome, token_id, p, ask)) = in_band.max_by(|a, b| (a.2 - a.3).total_cmp(&(b.2 - b.3))) else {
         let asks: Vec<_> = sides.iter().map(|(o, .., ask)| format!("{o} ask {ask:.2}")).collect();
-        return Verdict::Skip(format!(
-            "outside trade band [{}, {}]: {}",
-            s.min_trade_price,
-            s.max_trade_price,
-            asks.join(", ")
-        ));
+        return Verdict::skip(
+            SkipCode::OutsideBand,
+            format!("outside trade band [{}, {}]: {}", s.min_trade_price, s.max_trade_price, asks.join(", ")),
+        );
     };
 
     let edge = p - ask;
     if edge < s.min_edge {
-        return Verdict::Skip(format!("best edge {edge:+.3} ({outcome} p={p:.2} ask={ask:.2}) < {}", s.min_edge));
+        return Verdict::skip(
+            SkipCode::SmallEdge,
+            format!("best edge {edge:+.3} ({outcome} p={p:.2} ask={ask:.2}) < {}", s.min_edge),
+        );
     }
 
     // Sizing: fractional Kelly on the exposure cap as bankroll, hard-capped per trade.
     let usd = s.max_usd_per_trade.min(kelly_fraction(p, ask) * s.kelly_fraction * s.max_open_exposure_usd);
     if usd <= 0.0 {
-        return Verdict::Skip("kelly sizing gave zero".into());
+        return Verdict::skip(SkipCode::ZeroStake, "kelly sizing gave zero");
     }
     let (price, size, usd) = sized(book, ask, usd);
     if usd > s.max_usd_per_trade * 1.5 {
         // The exchange minimum pushed the order well past the cap; refuse.
-        return Verdict::Skip(format!("min order size {} x {price} = ${usd:.2} exceeds cap", book.min_order_size));
+        return Verdict::skip(
+            SkipCode::MinOrderTooBig,
+            format!("min order size {} x {price} = ${usd:.2} exceeds cap", book.min_order_size),
+        );
     }
 
     Verdict::Trade(Trade {
@@ -304,13 +360,13 @@ mod tests {
     fn trade(v: Verdict) -> Trade {
         match v {
             Verdict::Trade(t) => t,
-            Verdict::Skip(why) => panic!("expected a trade, got skip: {why}"),
+            Verdict::Skip(why) => panic!("expected a trade, got skip: {}", why.reason),
         }
     }
 
     fn skip(v: Verdict) -> String {
         match v {
-            Verdict::Skip(why) => why,
+            Verdict::Skip(why) => why.reason,
             Verdict::Trade(t) => panic!("expected a skip, got {t:?}"),
         }
     }

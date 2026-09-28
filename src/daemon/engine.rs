@@ -251,6 +251,7 @@ impl Engine {
                                 order: OrderEvent {
                                     ts: now(),
                                     slug: c.market.slug.clone(),
+                                    title: c.market.question.clone(),
                                     outcome: t.outcome.to_string(),
                                     price: t.price,
                                     size: t.size,
@@ -320,6 +321,7 @@ impl Engine {
         let order = OrderEvent {
             ts: now(),
             slug: c.market.slug.clone(),
+            title: c.market.question.clone(),
             outcome: t.outcome.to_string(),
             price: t.price,
             size: t.size,
@@ -369,16 +371,26 @@ impl Engine {
             .open_orders()
             .await?
             .into_iter()
-            .map(|o| OpenOrder {
-                id: o.id,
-                market: o.market.to_string(),
-                side: o.side.to_string(),
-                outcome: o.outcome,
-                price: d(o.price),
-                size: d(o.original_size),
-                matched: d(o.size_matched),
-                status: o.status.to_string(),
-                created_at: o.created_at.timestamp() as f64,
+            .map(|o| {
+                let market = o.market.to_string();
+                let known = self.db.order_market(&o.id, &market).unwrap_or_else(|e| {
+                    tracing::warn!("looking up the market of order {}: {e:#}", o.id);
+                    None
+                });
+                let (slug, title) = known.unzip();
+                OpenOrder {
+                    id: o.id,
+                    market,
+                    slug,
+                    title: title.flatten(),
+                    side: o.side.to_string(),
+                    outcome: o.outcome,
+                    price: d(o.price),
+                    size: d(o.original_size),
+                    matched: d(o.size_matched),
+                    status: o.status.to_string(),
+                    created_at: o.created_at.timestamp() as f64,
+                }
             })
             .collect();
         let balance_usd = ex.collateral_balance_usd().await;

@@ -44,6 +44,18 @@ export interface Status {
 
 export type Side = 'YES' | 'NO'
 
+/** Why a skip was a skip. Mirrors `SkipCode` in `src/signal.rs`. */
+export type SkipCode =
+  | 'unclear'
+  | 'unanswerable'
+  | 'no_asks'
+  | 'outside_band'
+  | 'small_edge'
+  | 'suspicious_edge'
+  | 'zero_stake'
+  | 'min_order_too_big'
+  | 'stale_brief'
+
 /** `trade`, `trade_unexecuted` and `skip` today; the pipeline may log others. */
 export type Action = 'trade' | 'trade_unexecuted' | 'skip' | (string & {})
 
@@ -70,6 +82,8 @@ export interface Recommendation {
   edge: number | null
   side: Side | null
   action: Action
+  /** `null` for trades, and for skips of a kind this console does not know yet. */
+  skip_code: SkipCode | null
   reason: string
   trade: Trade | null
   jev_cost: number
@@ -141,7 +155,11 @@ export interface Position {
 
 export interface OpenOrder {
   id: string
+  /** Condition id. */
   market: string
+  /** The market, when the daemon's log knows it. */
+  slug: string | null
+  title: string | null
   side: string
   outcome: string
   price: number
@@ -195,6 +213,8 @@ export interface Transfer {
 export interface OrderEvent {
   ts: number
   slug: string
+  /** The market question; the slug when unknown. */
+  title: string
   outcome: string
   price: number
   size: number

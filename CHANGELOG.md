@@ -5,6 +5,8 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 ## [Unreleased]
 
+- ✨ Skips carry a reason code (`decisions.skip_code`, backfilled for older rows), so the console explains them without parsing log text
+- ✨ Orders remember their market question; open orders and the order log always name their market
 - 🐛 An open console reloads itself when it reconnects to a daemon running a newer build, and retries at once when the tab or network comes back
 - ✨ Markets and briefings remember what you opened in this browser and dim it; a newer decision or brief counts as unread again
 - 💄 Plain-language Markets page, a two-pane briefings reader with keyboard navigation, a clearer Positions overview, and settings with a description each and an inline reset

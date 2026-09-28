@@ -223,6 +223,7 @@ impl<'a> Executor<'a> {
         let outcome = t.outcome.to_string();
         let row = OrderRow {
             slug,
+            question: &c.market.question,
             condition_id: &c.market.condition_id,
             token_id: &token_id,
             outcome: &outcome,

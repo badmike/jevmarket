@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS decisions (
     edge REAL,
     action TEXT,
     reason TEXT,
+    -- Why a skip was a skip, see `signal::SkipCode`; NULL for trades.
+    skip_code TEXT,
     jev_model TEXT,
     jev_cost REAL,
     research_cost REAL,
@@ -60,7 +62,9 @@ CREATE TABLE IF NOT EXISTS orders (
     dry_run INTEGER,
     response_json TEXT,
     -- `bot` or `manual` (placed from the console); NULL on rows from before the column.
-    source TEXT
+    source TEXT,
+    -- The market question when the order went out; NULL on rows from before the column.
+    question TEXT
 );
 CREATE TABLE IF NOT EXISTS resolutions (
     condition_id TEXT PRIMARY KEY,
@@ -75,7 +79,27 @@ CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 
 /// Columns added after a table was first shipped. `CREATE TABLE IF NOT EXISTS` leaves older
 /// files as they are, so these are added on open when missing.
-const ADDED_COLUMNS: [(&str, &str, &str); 2] = [("research", "midpoint", "REAL"), ("orders", "source", "TEXT")];
+const ADDED_COLUMNS: [(&str, &str, &str); 4] = [
+    ("research", "midpoint", "REAL"),
+    ("orders", "source", "TEXT"),
+    ("decisions", "skip_code", "TEXT"),
+    ("orders", "question", "TEXT"),
+];
+
+/// Skip codes for decisions logged before `skip_code` existed, read off the reason text.
+const BACKFILL_SKIP_CODES: &str = "
+UPDATE decisions SET skip_code = CASE
+    WHEN reason LIKE 'clarity %' THEN 'unclear'
+    WHEN reason LIKE 'answerable %' THEN 'unanswerable'
+    WHEN reason LIKE 'no asks%' THEN 'no_asks'
+    WHEN reason LIKE 'outside trade band%' THEN 'outside_band'
+    WHEN reason LIKE 'best edge%' THEN 'small_edge'
+    WHEN reason LIKE '%suspicious_edge%' THEN 'suspicious_edge'
+    WHEN reason LIKE 'kelly sizing%' THEN 'zero_stake'
+    WHEN reason LIKE 'min order size%' THEN 'min_order_too_big'
+    WHEN reason LIKE 'cached brief could not%' THEN 'stale_brief'
+END
+WHERE action = 'skip' AND skip_code IS NULL";
 
 /// Orders in these states never reached the book.
 const DEAD_STATUSES: &str = "('failed','rejected')";
@@ -95,6 +119,7 @@ pub struct DecisionRow<'a> {
     pub midpoint: Option<f64>,
     pub edge: Option<f64>,
     pub action: &'a str,
+    pub skip_code: Option<&'a str>,
     pub reason: &'a str,
     pub jev_model: Option<&'a str>,
     pub jev_cost: f64,
@@ -105,6 +130,7 @@ pub struct DecisionRow<'a> {
 #[derive(Debug, Default)]
 pub struct OrderRow<'a> {
     pub slug: &'a str,
+    pub question: &'a str,
     pub condition_id: &'a str,
     pub token_id: &'a str,
     pub outcome: &'a str,
@@ -254,14 +280,16 @@ impl Store {
                 conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
             }
         }
+        conn.execute_batch(BACKFILL_SKIP_CODES)?;
         Ok(Self { conn })
     }
 
     pub fn log_decision(&self, r: &DecisionRow<'_>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO decisions (ts, slug, condition_id, question, state_json, p_yes, answerable, clarity,
-                yes_ask, no_ask, midpoint, edge, action, reason, jev_model, jev_cost, research_cost, raw_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                yes_ask, no_ask, midpoint, edge, action, reason, jev_model, jev_cost, research_cost, raw_json,
+                skip_code)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 now(),
                 r.slug,
@@ -281,6 +309,7 @@ impl Store {
                 r.jev_cost,
                 r.research_cost,
                 r.raw.to_string(),
+                r.skip_code,
             ],
         )?;
         Ok(())
@@ -289,8 +318,8 @@ impl Store {
     pub fn log_order(&self, r: &OrderRow<'_>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO orders (ts, slug, condition_id, token_id, outcome, side, price, size, usd, order_id,
-                status, dry_run, response_json, source)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'BUY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                status, dry_run, response_json, source, question)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'BUY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 now(),
                 r.slug,
@@ -305,6 +334,7 @@ impl Store {
                 r.dry_run,
                 r.response.map(Value::to_string),
                 if r.manual { "manual" } else { "bot" },
+                Some(r.question).filter(|q| !q.is_empty()),
             ],
         )?;
         Ok(())
@@ -515,6 +545,47 @@ mod tests {
     }
 
     #[test]
+    fn skip_codes_are_backfilled_from_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let st = Store::open(&path).unwrap();
+        let state = json!({});
+        let row = |reason| DecisionRow {
+            slug: "a",
+            condition_id: "c",
+            question: "Q?",
+            state: &state,
+            p_yes: None,
+            answerable: None,
+            clarity: 1,
+            yes_ask: None,
+            no_ask: None,
+            midpoint: None,
+            edge: None,
+            action: "skip",
+            skip_code: None,
+            reason,
+            jev_model: None,
+            jev_cost: 0.0,
+            research_cost: None,
+            raw: &state,
+        };
+        st.log_decision(&row("answerable 0.21 < 0.7")).unwrap();
+        st.log_decision(&row("edge +0.300 > suspicious_edge 0.25: more likely a model error")).unwrap();
+        drop(st);
+        let st = Store::open(&path).unwrap();
+        let codes: Vec<String> = st
+            .conn
+            .prepare("SELECT skip_code FROM decisions ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(codes, ["unanswerable", "suspicious_edge"]);
+    }
+
+    #[test]
     fn spend_counts_briefs_and_logged_jev_calls() {
         let (_dir, st) = store();
         st.put_brief("a", &Brief { cost: 0.007, ..Brief::default() }, None).unwrap();
@@ -533,6 +604,7 @@ mod tests {
             midpoint: None,
             edge: None,
             action: "skip",
+            skip_code: None,
             reason: "r",
             jev_model: None,
             jev_cost: 0.0001,
@@ -578,6 +650,7 @@ mod tests {
             midpoint: Some(0.5),
             edge: Some(0.09),
             action: "trade",
+            skip_code: None,
             reason: "edge",
             jev_model: None,
             jev_cost: 0.0001,
@@ -654,6 +727,7 @@ mod tests {
             midpoint: Some(midpoint),
             edge: None,
             action: "skip",
+            skip_code: None,
             reason: "",
             jev_model: None,
             jev_cost: 0.0,

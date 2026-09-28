@@ -31,7 +31,8 @@ const RECOMMENDATION: &str = "
            o.outcome, o.price, o.size, o.usd, o.status, o.dry_run, d.state_json,
            EXISTS(SELECT 1 FROM resolutions WHERE condition_id = d.condition_id)
            OR COALESCE(date(json_extract(d.state_json, '$.today'),
-                            json_extract(d.state_json, '$.days_until_resolution') || ' days') < date('now'), 0)
+                            json_extract(d.state_json, '$.days_until_resolution') || ' days') < date('now'), 0),
+           d.skip_code
     FROM decisions d
     -- The order a pass placed right before logging this decision.
     LEFT JOIN orders o ON o.id = (
@@ -114,13 +115,16 @@ impl Db {
     pub fn orders(&self, limit: u32) -> Result<Vec<OrderEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT ts, slug, outcome, price, size, usd, status, dry_run, order_id, source = 'manual',
-                    json_extract(response_json, '$.error_msg')
-             FROM orders ORDER BY id DESC LIMIT ?1",
+                    json_extract(response_json, '$.error_msg'),
+                    COALESCE(question, (SELECT question FROM decisions WHERE slug = o.slug ORDER BY id DESC LIMIT 1))
+             FROM orders o ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
+            let slug: String = r.get(1)?;
             Ok(OrderEvent {
                 ts: r.get(0)?,
-                slug: r.get(1)?,
+                title: r.get::<_, Option<String>>(11)?.unwrap_or_else(|| slug.clone()),
+                slug,
                 outcome: r.get::<_, Option<String>>(2)?.unwrap_or_default(),
                 price: r.get::<_, Option<f64>>(3)?.unwrap_or_default(),
                 size: r.get::<_, Option<f64>>(4)?.unwrap_or_default(),
@@ -133,6 +137,24 @@ impl Db {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// `(slug, question)` of the market an exchange order belongs to, from the local log: the
+    /// order itself, else any order or decision on the same condition.
+    pub fn order_market(&self, order_id: &str, condition_id: &str) -> Result<Option<(String, Option<String>)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT slug, question FROM (
+                     SELECT slug, question, order_id = ?1 AS exact, id FROM orders
+                     WHERE order_id = ?1 OR condition_id = ?2
+                     UNION ALL
+                     SELECT slug, question, 0, -1 FROM decisions WHERE condition_id = ?2
+                 ) ORDER BY exact DESC, question IS NULL, id DESC LIMIT 1",
+                [order_id, condition_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     pub fn stats(&self) -> Result<StatsView> {
@@ -222,6 +244,7 @@ fn recommendation(r: &Row<'_>) -> rusqlite::Result<Recommendation> {
         edge,
         side,
         action: r.get::<_, Option<String>>(10)?.unwrap_or_default(),
+        skip_code: r.get(22)?,
         reason: r.get::<_, Option<String>>(11)?.unwrap_or_default(),
         trade,
         jev_cost: r.get::<_, Option<f64>>(12)?.unwrap_or_default(),
@@ -317,6 +340,7 @@ mod tests {
                 midpoint: Some(0.5),
                 edge: None,
                 action: "skip",
+                skip_code: None,
                 reason: "r",
                 jev_model: None,
                 jev_cost: 0.0,
@@ -325,6 +349,9 @@ mod tests {
             })
             .unwrap();
         assert!(db.orders(10).unwrap()[0].manual);
+        assert_eq!(db.orders(10).unwrap()[0].title, "Q?", "the question comes from the decision");
+        let (slug, question) = db.order_market("unknown-order", "c").unwrap().unwrap();
+        assert_eq!((slug.as_str(), question.as_deref()), ("m", Some("Q?")));
         assert!(db.recommendation("m").unwrap().unwrap().trade.is_none(), "the skip did not place it");
     }
 

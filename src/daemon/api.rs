@@ -89,6 +89,8 @@ pub struct Recommendation {
     pub side: Option<&'static str>,
     /// `trade`, `trade_unexecuted`, `skip`, or whatever the pipeline logs.
     pub action: String,
+    /// Why a skip was a skip (`signal::SkipCode`), `None` for trades.
+    pub skip_code: Option<String>,
     pub reason: String,
     pub trade: Option<Trade>,
     pub jev_cost: f64,
@@ -157,7 +159,11 @@ pub struct Position {
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenOrder {
     pub id: String,
+    /// Condition id.
     pub market: String,
+    /// The market, when the local log knows it.
+    pub slug: Option<String>,
+    pub title: Option<String>,
     pub side: String,
     pub outcome: String,
     pub price: f64,
@@ -238,6 +244,8 @@ pub struct SecretState {
 pub struct OrderEvent {
     pub ts: f64,
     pub slug: String,
+    /// The market question, the slug when unknown.
+    pub title: String,
     pub outcome: String,
     pub price: f64,
     pub size: f64,
@@ -343,6 +351,7 @@ mod tests {
             edge: Some(0.1),
             side: Some("YES"),
             action: "skip".into(),
+            skip_code: Some("small_edge".into()),
             reason: "r".into(),
             trade: None,
             jev_cost: 0.0,

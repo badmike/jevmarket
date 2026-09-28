@@ -95,15 +95,15 @@ All endpoints are under `<base-path>/api/`, take and return JSON, and report err
 | `GET activity` | The last 200 events of the kinds the activity feed shows |
 | `GET config` | Effective settings without secrets, their defaults, which keys the environment overrides |
 | `PATCH config` | `{"changes": {"key": value or null}, "confirm"?: "LIVE"}`. `null` returns a key to its default |
-| `GET recommendations` | The latest decision per market, with best edge, side and the order placed for it |
+| `GET recommendations` | The latest decision per market, with best edge, side, `skip_code` (why a skip was a skip), `settled`, and the order placed for it |
 | `GET recommendations/{slug}` | One decision with the state Jev saw and the brief behind it |
 | `GET briefs` | The latest brief per market, as summaries |
 | `GET briefs/{id}` | One brief in full, with freshness and the midpoint then and now |
 | `POST briefs/refresh` | `{"reference": "slug or URL"}`: research the market again |
 | `POST decide` | `{"reference": "slug or URL", "fresh"?: bool}`: research, ask Jev, log. Never trades |
-| `GET orders` | Orders the bot and the console logged, live and dry-run, with `manual` set for console orders |
+| `GET orders` | Orders the bot and the console logged, live and dry-run, with the market `title`, `manual` for console orders and the exchange's `message` for rejected ones |
 | `POST orders` | `{"reference": "slug or URL", "outcome": "YES" or "NO", "price": 0.42, "usd": 5, "confirm"?: "LIVE"}`: place a manual limit BUY. Refused and rejected orders answer `422` |
-| `GET positions` | Balance, positions, open orders and exposure against the cap, read from Polymarket |
+| `GET positions` | Balance, positions, open orders (with `slug` and `title` when the local log knows the market) and exposure against the cap, read from Polymarket |
 | `GET wallets` | The key's deposit wallet and polymarket.com wallet with their pUSD, read on-chain, plus warnings when the config disagrees |
 | `POST transfer` | `{"from": "deposit" or "proxy", "amount_usd": 5 or null}`: move pUSD to the other wallet, `null` moves everything. No typed confirmation: both ends are derived from the key |
 | `GET stats` | Everything `stats` shows, plus reliability bins and cumulative PnL over time |

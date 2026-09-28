@@ -13,11 +13,7 @@ import TableLoadingRow from '~/components/ui/TableLoadingRow.vue'
 import { ago, at, prob, usd } from '~/lib/format'
 
 /** Open orders on the exchange and the log of every order placed, or in dry runs, not placed. */
-const props = defineProps<{
-  openOrders: OpenOrder[] | undefined
-  /** Market titles by slug, where known. */
-  titles: Map<string, string>
-}>()
+defineProps<{ openOrders: OpenOrder[] | undefined }>()
 
 type LogFilter = 'all' | 'live' | 'dry' | 'rejected'
 
@@ -45,15 +41,6 @@ const counts = computed(() => {
 })
 const rows = computed(() => (log.value ?? []).filter(matches[filter.value]))
 
-/** Open orders only carry a market id; the log knows which market each placed order went to. */
-const slugByOrder = computed(
-  () => new Map((log.value ?? []).flatMap((o) => (o.order_id ? [[o.order_id, o.slug] as const] : [])))
-)
-const openRows = computed(() =>
-  (props.openOrders ?? []).map((o) => ({ ...o, slug: slugByOrder.value.get(o.id) ?? null }))
-)
-
-const title = (slug: string) => props.titles.get(slug) ?? slug
 /** `BUY` and `NO` read as "Buy No"; mixed-case outcomes like team names stay as they are. */
 const word = (s: string) => (s === s.toUpperCase() ? s.charAt(0) + s.slice(1).toLowerCase() : s)
 const shares = (n: number) => `${n.toFixed(2)} shares`
@@ -87,7 +74,7 @@ const shares = (n: number) => `${n.toFixed(2)} shares`
       </TableHeader>
       <TableBody>
         <TableRow
-          v-for="o in openRows"
+          v-for="o in openOrders"
           :key="o.id"
         >
           <TableCell>
@@ -97,7 +84,7 @@ const shares = (n: number) => `${n.toFixed(2)} shares`
                 :to="{ name: 'markets', params: { slug: o.slug } }"
                 class="font-medium text-primary hover:underline"
               >
-                {{ title(o.slug) }}
+                {{ o.title ?? o.slug }}
               </RouterLink>
               <span
                 v-else
@@ -210,7 +197,7 @@ const shares = (n: number) => `${n.toFixed(2)} shares`
                 class="hover:underline"
                 :class="o.dry_run ? 'text-muted' : 'font-medium text-primary'"
               >
-                {{ title(o.slug) }}
+                {{ o.title }}
               </RouterLink>
               <Badge
                 v-if="o.manual"

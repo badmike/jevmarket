@@ -1,58 +1,60 @@
 <script lang="ts">
-import type { Recommendation } from '~/api/types'
+import type { Recommendation, SkipCode } from '~/api/types'
 import { percent, points } from '~/lib/format'
 
-/** Skip reasons as the pipeline logs them (`src/signal.rs`, `src/pipeline.rs`), in plain words. */
-const skips: { match: RegExp; label: string; because: (minEdge: number) => string }[] = [
-  {
-    match: /^clarity .*pre-screen/,
+/** The limits a skip sentence may name. */
+export interface Limits {
+  minEdge: number
+  suspiciousEdge: number
+}
+
+const pts = (x: number) => `${Math.round(x * 100)} points`
+
+/** Every skip code in plain words: a short label for the table, and the reason for a sentence. */
+const skips: Record<SkipCode, { label: string; because: (r: Recommendation, l: Limits) => string }> = {
+  unclear: {
     label: 'Unclear rules',
-    because: () => 'The rules looked too unclear to pay for research',
+    because: (r) =>
+      r.p_yes == null
+        ? 'The rules looked too unclear to pay for research'
+        : 'The rules are too unclear to bet on',
   },
-  { match: /^clarity/, label: 'Unclear rules', because: () => 'The rules are too unclear to bet on' },
-  {
-    match: /^answerable/,
+  unanswerable: {
     label: 'Not enough info',
     because: () => 'There is not enough public information to call it yet',
   },
-  {
-    match: /suspicious_edge/,
-    label: 'Gap too big to trust',
-    because: () => 'A gap this big is more likely Jev being wrong than the market',
-  },
-  {
-    match: /^best edge/,
-    label: 'Gap too small',
-    because: (minEdge) => `The gap is below the ${Math.round(minEdge * 100)} points the bot needs`,
-  },
-  {
-    match: /^outside trade band/,
+  no_asks: { label: 'Nobody selling', because: () => 'Nobody is selling either side right now' },
+  outside_band: {
     label: 'Price too extreme',
     because: () => 'The price is outside the range the bot trades',
   },
-  { match: /^no asks/, label: 'Nobody selling', because: () => 'Nobody is selling either side right now' },
-  { match: /^kelly/, label: 'Stake too small', because: () => 'The bet size worked out to zero' },
-  {
-    match: /^min order size/,
+  small_edge: {
+    label: 'Gap too small',
+    because: (_, l) => `The gap is below the ${pts(l.minEdge)} the bot needs`,
+  },
+  suspicious_edge: {
+    label: 'Gap too big to trust',
+    because: (_, l) => `A gap above ${pts(l.suspiciousEdge)} is more likely Jev being wrong than the market`,
+  },
+  zero_stake: { label: 'Stake too small', because: () => 'The bet size worked out to zero' },
+  min_order_too_big: {
     label: 'Minimum order too big',
     because: () => 'The smallest order allowed is above the per-trade cap',
   },
-  {
-    match: /^cached brief/,
+  stale_brief: {
     label: 'Research failed',
     because: () => 'Fresh research could not be fetched before trading',
   },
-]
+}
 
-const skipRule = (r: Recommendation) =>
-  r.action === 'skip' ? skips.find((s) => s.match.test(r.reason)) : undefined
+const skipOf = (r: Recommendation) => (r.action === 'skip' && r.skip_code ? skips[r.skip_code] : undefined)
 
 /** A few words on why, for the table. Empty when the badge says it all. */
 export const verdictLabel = (r: Recommendation): string =>
-  r.action === 'trade_unexecuted' ? 'Not placed' : (skipRule(r)?.label ?? '')
+  r.action === 'trade_unexecuted' ? 'Not placed' : (skipOf(r)?.label ?? '')
 
 /** One plain sentence on what Jev concluded and what the bot did about it. */
-export function verdictSentence(r: Recommendation, minEdge: number): string {
+export function verdictSentence(r: Recommendation, limits: Limits): string {
   const view =
     r.p_yes == null
       ? 'Jev only checked how clear the rules are.'
@@ -64,8 +66,8 @@ export function verdictSentence(r: Recommendation, minEdge: number): string {
     return `${view} Its estimate for ${side} beats the price by ${points(r.edge)}, so the bot bought ${side}${dryRun}.`
   }
   if (r.action === 'trade_unexecuted') return `${view} The bot wanted to buy ${side}, but the order was not placed.`
-  const skip = skipRule(r)
-  return skip ? `${view} ${skip.because(minEdge)}, so the bot skipped it.` : `${view} The bot skipped it.`
+  const skip = skipOf(r)
+  return skip ? `${view} ${skip.because(r, limits)}, so the bot skipped it.` : `${view} The bot skipped it.`
 }
 </script>
 

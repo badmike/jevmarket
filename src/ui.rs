@@ -115,7 +115,7 @@ pub fn print_decision(c: &Candidate, a: &Assessment, verdict: &Verdict) {
             t.usd,
             t.edge
         ),
-        Verdict::Skip(why) => println!("  {}", style(format!("skip: {why}")).dim()),
+        Verdict::Skip(why) => println!("  {}", style(format!("skip: {}", why.reason)).dim()),
     }
 }
 

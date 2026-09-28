@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useOrders, usePositions, useRecommendations, useWallets } from '~/api/queries'
+import { useOrders, usePositions, useWallets } from '~/api/queries'
 import Icon from '~/components/Icon.vue'
 import PositionOrders from '~/components/PositionOrders.vue'
 import PositionTable from '~/components/PositionTable.vue'
@@ -12,7 +12,6 @@ import { signedUsd, usd } from '~/lib/format'
 const positions = usePositions()
 const wallets = useWallets()
 const orders = useOrders()
-const recommendations = useRecommendations()
 
 const data = computed(() => positions.data.value)
 const reloading = computed(
@@ -20,14 +19,6 @@ const reloading = computed(
 )
 const reload = () => Promise.all([positions.refetch(), wallets.refetch(), orders.refetch()])
 
-/** Market titles by slug, so the order log reads as questions instead of slugs. */
-const titles = computed(
-  () =>
-    new Map([
-      ...(recommendations.data.value ?? []).map((r) => [r.slug, r.question] as const),
-      ...(data.value?.positions ?? []).flatMap((p) => (p.title ? [[p.slug, p.title] as const] : [])),
-    ])
-)
 const pnl = computed(() => data.value?.positions.reduce((sum, p) => sum + p.pnl_usd, 0) ?? 0)
 </script>
 
@@ -99,7 +90,6 @@ const pnl = computed(() => data.value?.positions.reduce((sum, p) => sum + p.pnl_
 
     <PositionOrders
       :open-orders="data?.wallet ? data.open_orders : undefined"
-      :titles="titles"
     />
   </div>
 </template>

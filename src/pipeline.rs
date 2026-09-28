@@ -14,7 +14,7 @@ use crate::jev::JevClient;
 use crate::markets::{Candidate, build_state, scan, today, update_resolutions};
 use crate::openrouter::{OpenRouter, OpenRouterError};
 use crate::research::{Brief, Researcher, Topic};
-use crate::signal::{JevView, Verdict, ask_clarity, ask_jev, evaluate};
+use crate::signal::{JevView, Skip, SkipCode, Verdict, ask_clarity, ask_jev, evaluate};
 use crate::store::{DecisionRow, Store};
 
 pub struct Assessment {
@@ -111,17 +111,21 @@ impl<'a> Pipeline<'a> {
                     a = self.assess(c, Some(b), false).await?;
                     verdict = evaluate(&a.view, &c.book, self.s);
                 }
-                None => verdict = Verdict::Skip("cached brief could not be refreshed before trading".into()),
+                None => {
+                    let why = "cached brief could not be refreshed before trading";
+                    verdict = Verdict::Skip(Skip { code: SkipCode::StaleBrief, reason: why.into() });
+                }
             }
         }
         if let Verdict::Trade(t) = &verdict
             && t.edge > self.s.suspicious_edge
         {
             tracing::warn!("{}: suspicious edge, {}", c.market.slug, t.rationale);
-            verdict = Verdict::Skip(format!(
+            let reason = format!(
                 "edge {:+.3} > suspicious_edge {}: more likely a model error than a mispricing",
                 t.edge, self.s.suspicious_edge
-            ));
+            );
+            verdict = Verdict::Skip(Skip { code: SkipCode::SuspiciousEdge, reason });
         }
         Ok(Decided::Assessed(Box::new(a), verdict))
     }
@@ -196,6 +200,7 @@ impl<'a> Pipeline<'a> {
             midpoint: c.book.midpoint(),
             edge: None,
             action: "skip",
+            skip_code: Some(SkipCode::Unclear.as_str()),
             reason: &reason,
             jev_model: v.model.as_deref(),
             jev_cost: v.cost,
@@ -212,11 +217,11 @@ impl<'a> Pipeline<'a> {
     }
 
     pub fn log(&self, c: &Candidate, a: &Assessment, verdict: &Verdict, executed: bool) -> Result<()> {
-        let (action, edge, reason) = match verdict {
+        let (action, edge, reason, skip_code) = match verdict {
             Verdict::Trade(t) => {
-                (if executed { "trade" } else { "trade_unexecuted" }, Some(t.edge), t.rationale.as_str())
+                (if executed { "trade" } else { "trade_unexecuted" }, Some(t.edge), t.rationale.as_str(), None)
             }
-            Verdict::Skip(why) => ("skip", None, why.as_str()),
+            Verdict::Skip(why) => ("skip", None, why.reason.as_str(), Some(why.code.as_str())),
         };
         self.store.log_decision(&DecisionRow {
             slug: &c.market.slug,
@@ -231,6 +236,7 @@ impl<'a> Pipeline<'a> {
             midpoint: c.book.midpoint(),
             edge,
             action,
+            skip_code,
             reason,
             jev_model: a.view.model.as_deref(),
             jev_cost: a.view.cost,
@@ -440,7 +446,7 @@ mod tests {
         let p = Pipeline::new(&s, &store, Research::Unlimited).unwrap();
 
         let (_, verdict) = assessed(p.decide(&test_candidate(0.5, 10, 20_000.0), false).await.unwrap());
-        assert!(matches!(verdict, Verdict::Skip(ref why) if why.contains("suspicious_edge")), "{verdict:?}");
+        assert!(matches!(verdict, Verdict::Skip(ref why) if why.code == SkipCode::SuspiciousEdge), "{verdict:?}");
     }
 
     #[tokio::test]

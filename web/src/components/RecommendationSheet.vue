@@ -137,7 +137,7 @@ const act = async (kind: 'decide' | 'brief') => {
         />
         <template v-else-if="data">
           <section class="grid gap-3">
-            <p class="text-base text-primary">{{ verdictSentence(data, limits.minEdge) }}</p>
+            <p class="text-base text-primary">{{ verdictSentence(data, limits) }}</p>
             <div class="flex flex-wrap items-center gap-2">
               <VerdictBadge :action="data.action" />
               <p class="text-xs break-words text-muted">{{ data.reason }}</p>

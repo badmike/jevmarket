@@ -67,7 +67,7 @@ const describe = (e: ActivityEvent): Line => {
         ts: o.ts,
         icon: 'lucide:receipt',
         tone: o.status === 'rejected' || o.status === 'refused' ? 'text-destructive' : 'text-accent',
-        text: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} ${o.status}: BUY ${o.outcome} ${o.size} @ ${prob(o.price, 3)} (${usd(o.usd)}) on ${o.slug}${o.message ? `, ${o.message}` : ''}`,
+        text: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} ${o.status}: BUY ${o.outcome} ${o.size} @ ${prob(o.price, 3)} (${usd(o.usd)}) on ${o.title}${o.message ? `, ${o.message}` : ''}`,
       }
     }
     case 'brief':
