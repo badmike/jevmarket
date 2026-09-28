@@ -1,37 +1,70 @@
 [package]
 name = "jevmarket"
-version = "0.1.0"
+version = "26.9.28"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.98"
 description = "Polymarket trading bot priced by Jev (TypeSafe AI's System One decision model) via OpenRouter"
 authors = ["Michael Wallner <m.wallner@badsoft.net>"]
 license = "MIT"
 repository = "https://github.com/badmike/jevmarket"
 readme = "README.md"
-keywords = ["polymarket", "prediction-markets", "trading-bot", "jev", "openrouter"]
+keywords = [
+  "polymarket",
+  "prediction-markets",
+  "trading-bot",
+  "jev",
+  "openrouter",
+]
 categories = ["command-line-utilities", "finance"]
 
 [dependencies]
-alloy = { version = "1.6", default-features = false, features = ["contract", "providers", "reqwest-rustls-tls", "sol-types"] }
+alloy = { version = "1.8", default-features = false, features = [
+  "contract",
+  "providers",
+  "reqwest-rustls-tls",
+  "sol-types",
+] }
 anyhow = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+axum = { version = "0.8", default-features = false, features = [
+  "http1",
+  "json",
+  "query",
+  "tokio",
+] }
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "serde",
+] }
 clap = { version = "4.6", features = ["derive", "env"] }
-comfy-table = "7"
+comfy-table = "7.2"
 console = "0.16"
 etcetera = "0.11"
 fastrand = "2"
 futures = "0.3"
 indexmap = { version = "2", features = ["serde"] }
 inquire = "0.9"
-polymarket_client_sdk_v2 = { version = "0.8", features = ["clob", "data", "gamma"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+polymarket_client_sdk_v2 = { version = "0.8", features = [
+  "clob",
+  "data",
+  "gamma",
+] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "rustls",
+] }
 rusqlite = { version = "0.40", features = ["bundled"] }
-rust_decimal = "1.41"
+rust_decimal = "1.43"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt",
+  "signal",
+  "sync",
+  "time",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
@@ -41,4 +74,7 @@ wiremock = "0.6"
 
 [profile.release]
 lto = "thin"
+codegen-units = 1
+panic = "abort"
+opt-level = 2
 strip = true
