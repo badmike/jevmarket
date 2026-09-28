@@ -5,6 +5,7 @@ import type {
   ConfigView,
   ErrorBody,
   Event,
+  ManualOrder,
   OrderEvent,
   Positions,
   Recommendation,
@@ -79,6 +80,8 @@ export const api = {
   decide: (reference: string, fresh = false) =>
     json<Recommendation>('POST', 'decide', { reference, fresh }),
   refreshBrief: (reference: string) => json<BriefRecord>('POST', 'briefs/refresh', { reference }),
+  placeOrder: (order: ManualOrder, confirm?: string) =>
+    json<OrderEvent>('POST', 'orders', { ...order, confirm }),
 }
 
 export const errorMessage = (e: unknown): string =>

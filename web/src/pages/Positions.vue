@@ -5,6 +5,7 @@ import Icon from '~/components/Icon.vue'
 import OrderStatus from '~/components/OrderStatus.vue'
 import QueryError from '~/components/QueryError.vue'
 import StatTile from '~/components/StatTile.vue'
+import { Badge } from '~/components/ui/badge'
 import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Skeleton } from '~/components/ui/skeleton'
@@ -233,7 +234,7 @@ const data = computed(() => positions.data.value)
     <section class="grid gap-3">
       <div class="grid gap-1">
         <h2 class="text-base font-semibold text-primary">Order log</h2>
-        <p class="text-sm text-muted">Every order the bot placed or, in dry runs, would have placed.</p>
+        <p class="text-sm text-muted">Every order the bot or you placed or, in dry runs, would have placed.</p>
       </div>
       <QueryError
         v-if="orders.error.value"
@@ -276,6 +277,14 @@ const data = computed(() => positions.data.value)
               class="whitespace-nowrap tabular-nums"
             >
               BUY {{ o.outcome }} {{ o.size }} @ {{ prob(o.price, 3) }}
+              <Badge
+                v-if="o.manual"
+                variant="surface"
+                size="sm"
+                class="ml-1"
+              >
+                Manual
+              </Badge>
             </TableCell>
             <TableCell
               label="Amount"

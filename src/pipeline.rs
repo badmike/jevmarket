@@ -318,7 +318,7 @@ impl<'a> Pipeline<'a> {
                 Ok(Decided::Unclear(reason)) => on(Step::Unclear(&c, &reason)),
                 Ok(Decided::Assessed(a, verdict)) => {
                     let placed = match &verdict {
-                        Verdict::Trade(t) => Some(ex.place(&c, t).await?),
+                        Verdict::Trade(t) => Some(ex.place(&c, t, false).await?),
                         Verdict::Skip(_) => None,
                     };
                     self.log(&c, &a, &verdict, placed.as_ref().is_some_and(|p| p.ok))?;

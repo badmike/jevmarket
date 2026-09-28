@@ -253,6 +253,8 @@ pub struct OrderEvent {
     pub dry_run: bool,
     pub order_id: Option<String>,
     pub message: Option<String>,
+    /// Placed from the console rather than by the signal.
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

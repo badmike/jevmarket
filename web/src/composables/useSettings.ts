@@ -12,5 +12,6 @@ export function useThresholds() {
     minAnswerable: num('min_answerable', 0.7),
     minClarity: num('min_clarity', 2),
     maxPriceMove: num('research_max_price_move', 0.05),
+    maxUsdPerTrade: num('max_usd_per_trade', 5),
   }))
 }

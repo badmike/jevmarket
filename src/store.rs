@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS orders (
     order_id TEXT,
     status TEXT,
     dry_run INTEGER,
-    response_json TEXT
+    response_json TEXT,
+    -- `bot` or `manual` (placed from the console); NULL on rows from before the column.
+    source TEXT
 );
 CREATE TABLE IF NOT EXISTS resolutions (
     condition_id TEXT PRIMARY KEY,
@@ -73,7 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 
 /// Columns added after a table was first shipped. `CREATE TABLE IF NOT EXISTS` leaves older
 /// files as they are, so these are added on open when missing.
-const ADDED_COLUMNS: [(&str, &str, &str); 1] = [("research", "midpoint", "REAL")];
+const ADDED_COLUMNS: [(&str, &str, &str); 2] = [("research", "midpoint", "REAL"), ("orders", "source", "TEXT")];
 
 /// Orders in these states never reached the book.
 const DEAD_STATUSES: &str = "('failed','rejected')";
@@ -113,6 +115,8 @@ pub struct OrderRow<'a> {
     pub status: &'a str,
     pub dry_run: bool,
     pub response: Option<&'a Value>,
+    /// Placed from the console rather than by the signal. Stored in `source`.
+    pub manual: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,8 +271,8 @@ impl Store {
     pub fn log_order(&self, r: &OrderRow<'_>) -> Result<()> {
         self.conn.execute(
             "INSERT INTO orders (ts, slug, condition_id, token_id, outcome, side, price, size, usd, order_id,
-                status, dry_run, response_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'BUY', ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                status, dry_run, response_json, source)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'BUY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 now(),
                 r.slug,
@@ -282,6 +286,7 @@ impl Store {
                 r.status,
                 r.dry_run,
                 r.response.map(Value::to_string),
+                if r.manual { "manual" } else { "bot" },
             ],
         )?;
         Ok(())

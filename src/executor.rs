@@ -197,21 +197,22 @@ impl<'a> Executor<'a> {
 
     // --- guards -------------------------------------------------------------
 
-    /// A refusal reason, or `None` if the trade may go ahead.
-    pub async fn check(&mut self, c: &Candidate, t: &Trade) -> Result<Option<String>> {
+    /// A refusal reason, or `None` if the trade may go ahead. A manual order overrides the
+    /// per-run trade count and the one-order-per-market rule, never the money caps.
+    pub async fn check(&mut self, c: &Candidate, t: &Trade, manual: bool) -> Result<Option<String>> {
         let (max_trades, max_usd, max_exposure) =
             (self.s.max_trades_per_run, self.s.max_usd_per_trade, self.s.max_open_exposure_usd);
-        if self.trades_this_run >= max_trades {
+        if !manual && self.trades_this_run >= max_trades {
             return Ok(Some(format!("max_trades_per_run={max_trades} reached")));
         }
         if t.usd > max_usd * 1.5 {
             return Ok(Some(format!("${:.2} exceeds per-trade cap", t.usd)));
         }
-        if self.store.has_order_for(&c.market.condition_id, false)? {
+        if !manual && self.store.has_order_for(&c.market.condition_id, false)? {
             return Ok(Some("already ordered on this market (db)".into()));
         }
         let ex = self.exposure(false).await?;
-        if ex.condition_ids.contains(&c.market.condition_id) {
+        if !manual && ex.condition_ids.contains(&c.market.condition_id) {
             return Ok(Some("already exposed to this market (chain)".into()));
         }
         if ex.total() + t.usd > max_exposure {
@@ -222,9 +223,10 @@ impl<'a> Executor<'a> {
 
     // --- action -------------------------------------------------------------
 
-    pub async fn place(&mut self, c: &Candidate, t: &Trade) -> Result<Placed> {
+    /// Place a trade the signal proposed, or with `manual`, one a person asked for.
+    pub async fn place(&mut self, c: &Candidate, t: &Trade, manual: bool) -> Result<Placed> {
         let slug = c.market.slug.as_str();
-        if let Some(refusal) = self.check(c, t).await? {
+        if let Some(refusal) = self.check(c, t, manual).await? {
             tracing::info!("refuse {slug}: {refusal}");
             return Ok(Placed { ok: false, order_id: None, status: "refused".into(), message: Some(refusal) });
         }
@@ -238,6 +240,7 @@ impl<'a> Executor<'a> {
             price: t.price,
             size: t.size,
             usd: t.usd,
+            manual,
             ..OrderRow::default()
         };
 

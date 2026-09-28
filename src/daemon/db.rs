@@ -32,6 +32,7 @@ const RECOMMENDATION: &str = "
     -- The order a pass placed right before logging this decision.
     LEFT JOIN orders o ON o.id = (
         SELECT id FROM orders WHERE condition_id = d.condition_id AND ts BETWEEN d.ts - 600 AND d.ts
+            AND source IS NOT 'manual'
         ORDER BY ts DESC LIMIT 1)";
 
 /// Columns of [`brief_record`], after `FROM research r`.
@@ -100,10 +101,11 @@ impl Db {
         Ok(self.conn.query_row(&sql, [value], |r| brief_record(r, ttl_s)).optional()?)
     }
 
-    /// Orders the bot logged, live and dry-run, newest first.
+    /// Orders the bot and the console logged, live and dry-run, newest first.
     pub fn orders(&self, limit: u32) -> Result<Vec<OrderEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, slug, outcome, price, size, usd, status, dry_run, order_id FROM orders ORDER BY id DESC LIMIT ?1",
+            "SELECT ts, slug, outcome, price, size, usd, status, dry_run, order_id, source = 'manual'
+             FROM orders ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
             Ok(OrderEvent {
@@ -117,6 +119,7 @@ impl Db {
                 dry_run: r.get::<_, Option<bool>>(7)?.unwrap_or_default(),
                 order_id: r.get(8)?,
                 message: None,
+                manual: r.get::<_, Option<bool>>(9)?.unwrap_or_default(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -277,6 +280,39 @@ mod tests {
         assert_eq!(side, "NO");
         assert!((edge - 0.18).abs() < 1e-9);
         assert_eq!(best_edge(None, Some(0.5), None), None);
+    }
+
+    #[test]
+    fn manual_orders_are_flagged_and_not_attached_to_decisions() {
+        use crate::store::{DecisionRow, OrderRow};
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        let order = OrderRow { slug: "m", condition_id: "c", outcome: "YES", status: "live", ..OrderRow::default() };
+        db.store.log_order(&OrderRow { manual: true, ..order }).unwrap();
+        let state = serde_json::json!({});
+        db.store
+            .log_decision(&DecisionRow {
+                slug: "m",
+                condition_id: "c",
+                question: "Q?",
+                state: &state,
+                p_yes: Some(0.5),
+                answerable: Some(0.9),
+                clarity: 3,
+                yes_ask: Some(0.5),
+                no_ask: Some(0.5),
+                midpoint: Some(0.5),
+                edge: None,
+                action: "skip",
+                reason: "r",
+                jev_model: None,
+                jev_cost: 0.0,
+                research_cost: None,
+                raw: &state,
+            })
+            .unwrap();
+        assert!(db.orders(10).unwrap()[0].manual);
+        assert!(db.recommendation("m").unwrap().unwrap().trade.is_none(), "the skip did not place it");
     }
 
     #[test]

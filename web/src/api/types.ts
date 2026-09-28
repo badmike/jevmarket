@@ -170,6 +170,19 @@ export interface OrderEvent {
   dry_run: boolean
   order_id: string | null
   message: string | null
+  /** Placed from the console rather than by the signal. */
+  manual: boolean
+}
+
+/** A BUY placed from the console, whatever the signal said. The money caps still apply. */
+export interface ManualOrder {
+  /** Slug or polymarket.com URL. */
+  reference: string
+  outcome: Side
+  /** Limit price. */
+  price: number
+  /** Roughly what to spend; the daemon rounds the size to the book. */
+  usd: number
 }
 
 export interface Bucket {

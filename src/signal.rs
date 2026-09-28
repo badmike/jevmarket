@@ -99,7 +99,8 @@ impl Book {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
 pub enum Outcome {
     Yes,
     No,
@@ -220,9 +221,7 @@ pub fn evaluate(view: &JevView, book: &Book, s: &Settings) -> Verdict {
     if usd <= 0.0 {
         return Verdict::Skip("kelly sizing gave zero".into());
     }
-    let price = round_to_tick(ask, book.tick_size);
-    let size = ((usd / price * 100.0).floor() / 100.0).max(book.min_order_size);
-    let usd = (price * size * 1e4).round() / 1e4;
+    let (price, size, usd) = sized(book, ask, usd);
     if usd > s.max_usd_per_trade * 1.5 {
         // The exchange minimum pushed the order well past the cap; refuse.
         return Verdict::Skip(format!("min order size {} x {price} = ${usd:.2} exceeds cap", book.min_order_size));
@@ -240,6 +239,34 @@ pub fn evaluate(view: &JevView, book: &Book, s: &Settings) -> Verdict {
             view.answerable, view.clarity
         ),
     })
+}
+
+/// A BUY a person asked for: about `usd` of `outcome` at limit `price`. Jev's probability plays
+/// no part, so the edge is zero; the executor's money caps still apply.
+pub fn manual_trade(book: &Book, outcome: Outcome, price: f64, usd: f64) -> Result<Trade, String> {
+    if !(price > 0.0 && price < 1.0) {
+        return Err(format!("price {price} must be between 0 and 1"));
+    }
+    if !usd.is_finite() || usd <= 0.0 {
+        return Err(format!("amount ${usd} must be positive"));
+    }
+    let (price, size, usd) = sized(book, price, usd);
+    if !(price > 0.0 && price < 1.0) {
+        return Err(format!("price rounds to {price} on a {} tick", book.tick_size));
+    }
+    let token_id = match outcome {
+        Outcome::Yes => book.yes_token_id,
+        Outcome::No => book.no_token_id,
+    };
+    Ok(Trade { outcome, token_id, price, size, usd, edge: 0.0, rationale: "manual order".into() })
+}
+
+/// `(price, size, usd)` for about `usd` at `price`: the price on the tick, whole cents of shares,
+/// at least the book's minimum size.
+fn sized(book: &Book, price: f64, usd: f64) -> (f64, f64, f64) {
+    let price = round_to_tick(price, book.tick_size);
+    let size = ((usd / price * 100.0).floor() / 100.0).max(book.min_order_size);
+    (price, size, (price * size * 1e4).round() / 1e4)
 }
 
 #[cfg(test)]
@@ -345,6 +372,16 @@ mod tests {
     fn refuses_when_min_size_blows_cap() {
         let s = Settings { max_usd_per_trade: 3.0, ..Settings::default() };
         skip(evaluate(&view(0.95, 0.9, 3), &book(0.90, 0.88, 100.0), &s));
+    }
+
+    #[test]
+    fn manual_trade_rounds_like_the_signal() {
+        let t = manual_trade(&book(0.40, 0.38, 5.0), Outcome::No, 0.617, 4.0).unwrap();
+        assert_eq!((t.token_id, t.price, t.size), (NO, 0.62, 6.45));
+        assert_eq!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 0.40, 1.0).unwrap().size, 5.0, "min size");
+        assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 1.2, 4.0).is_err());
+        assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 0.004, 4.0).is_err(), "rounds to zero");
+        assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 0.4, 0.0).is_err());
     }
 
     #[test]

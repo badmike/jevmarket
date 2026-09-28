@@ -5,6 +5,7 @@ import { api, errorMessage } from '~/api/client'
 import { useRecommendation } from '~/api/queries'
 import BriefView from '~/components/BriefView.vue'
 import Icon from '~/components/Icon.vue'
+import OrderDialog from '~/components/OrderDialog.vue'
 import OrderStatus from '~/components/OrderStatus.vue'
 import ProbabilityBar from '~/components/ProbabilityBar.vue'
 import QueryError from '~/components/QueryError.vue'
@@ -101,6 +102,10 @@ const act = async (kind: 'decide' | 'brief') => {
             <Icon name="lucide:newspaper" />
             Refresh brief
           </Button>
+          <OrderDialog
+            v-if="data"
+            :recommendation="data"
+          />
         </div>
       </div>
 

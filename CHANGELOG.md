@@ -5,6 +5,7 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 ## [Unreleased]
 
+- ✨ Place manual orders from the console, whatever the signal said, inside the money caps; logged with `source = 'manual'`
 - ⚡️ Cut researcher tokens by about 30%: a terser brief that fits `research_max_chars`, source URLs from citations, `research_max_results` defaults to 5
 - ✨ Add `resolve` and fetch market outcomes at the start of every `run` pass; `stats` now reports Brier scores, hit rates by edge, answerable and clarity, and live and dry-run PnL
 - 🐛 Trim brief considerations for and against YES in turn; before, every point against YES was dropped before any point for it

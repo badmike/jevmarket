@@ -29,7 +29,7 @@ use super::api::{
     SecretState, StatsView, Status,
 };
 use super::db::Db;
-use super::engine::Command;
+use super::engine::{Command, ManualOrder};
 use super::hub::Hub;
 use super::{Options, assets, settings};
 use crate::config::{self, ENV_OVERRIDES, Paths, Settings};
@@ -81,7 +81,7 @@ pub fn router(state: AppState, base_path: &str) -> Router {
         .route("/briefs", get(briefs))
         .route("/briefs/{id}", get(brief))
         .route("/briefs/refresh", post(refresh_brief))
-        .route("/orders", get(orders))
+        .route("/orders", get(orders).post(place_order))
         .route("/positions", get(positions))
         .route("/stats", get(stats))
         .route("/pass", post(run_pass))
@@ -438,6 +438,21 @@ async fn decide(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<Rec
 async fn refresh_brief(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<BriefRecord> {
     let reference = body.reference()?;
     st.ask(|reply| Command::RefreshBrief { reference, reply }).await.map(Json)
+}
+
+#[derive(Deserialize)]
+struct OrderRequest {
+    #[serde(flatten)]
+    order: ManualOrder,
+    confirm: Option<String>,
+}
+
+/// Place a manual order, whatever the signal said. The money caps still apply.
+async fn place_order(State(st): Shared, Json(body): Json<OrderRequest>) -> ApiResult<OrderEvent> {
+    require_confirm(!st.settings()?.dry_run, body.confirm.as_deref())?;
+    let reference = MarketRef { reference: body.order.reference, fresh: false }.reference()?;
+    let order = ManualOrder { reference, ..body.order };
+    st.ask(|reply| Command::Order { order, reply }).await.map(Json)
 }
 
 #[cfg(test)]

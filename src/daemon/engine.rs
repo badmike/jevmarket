@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use futures::future::{Fuse, FusedFuture as _, FutureExt as _};
 use futures::stream::{FuturesUnordered, StreamExt as _};
 use polymarket_client_sdk_v2::{clob, gamma};
@@ -27,7 +27,7 @@ use crate::config::{Paths, Settings};
 use crate::executor::Executor;
 use crate::markets::{Candidate, load_candidate};
 use crate::pipeline::{Decided, Pipeline, Research, Step, is_fatal};
-use crate::signal::Verdict;
+use crate::signal::{Outcome, Verdict, manual_trade};
 
 /// Log target of pass start and end lines: the terminal gets them, the event bus skips them
 /// because `PassStarted` and `PassFinished` carry the same news.
@@ -43,6 +43,19 @@ pub enum Command {
     Decide { reference: String, fresh: bool, reply: Reply<Recommendation> },
     RefreshBrief { reference: String, reply: Reply<BriefRecord> },
     Positions(Reply<Positions>),
+    Order { order: ManualOrder, reply: Reply<OrderEvent> },
+}
+
+/// A BUY a person asked for in the console.
+#[derive(Debug, serde::Deserialize)]
+pub struct ManualOrder {
+    /// Slug or polymarket.com URL.
+    pub reference: String,
+    pub outcome: Outcome,
+    /// Limit price.
+    pub price: f64,
+    /// Roughly what to spend; the size is rounded like the signal's trades.
+    pub usd: f64,
 }
 
 pub struct Engine {
@@ -116,6 +129,9 @@ impl Engine {
                     }
                     Command::Positions(reply) => {
                         jobs.push(Box::pin(async move { let _ = reply.send(this.positions().await); }));
+                    }
+                    Command::Order { order, reply } => {
+                        jobs.push(Box::pin(async move { let _ = reply.send(this.order(order).await); }));
                     }
                 },
                 Some(()) = jobs.next(), if !jobs.is_empty() => {}
@@ -243,6 +259,7 @@ impl Engine {
                                     dry_run: s.dry_run,
                                     order_id: placed.order_id.clone(),
                                     message: placed.message.clone(),
+                                    manual: false,
                                 },
                             });
                         }
@@ -290,6 +307,36 @@ impl Engine {
         self.publish_brief(&c.market.slug, &s);
         let latest = self.db.recommendation_detail(&c.market.slug, Self::ttl_s(&s))?.and_then(|d| d.brief);
         latest.context("the brief was not stored")
+    }
+
+    /// Place a manual order on the current book, logged with `source = 'manual'`. Refused and
+    /// rejected orders are errors, after they reached the activity feed.
+    async fn order(&self, o: ManualOrder) -> Result<OrderEvent> {
+        let s = self.settings()?;
+        let c = self.candidate(&s, &o.reference).await?;
+        let t = manual_trade(&c.book, o.outcome, o.price, o.usd).map_err(anyhow::Error::msg)?;
+        let mut ex = Executor::create(&s, &self.db.store, s.dry_run).await?;
+        let placed = ex.place(&c, &t, true).await?;
+        let order = OrderEvent {
+            ts: now(),
+            slug: c.market.slug.clone(),
+            outcome: t.outcome.to_string(),
+            price: t.price,
+            size: t.size,
+            usd: t.usd,
+            status: placed.status.clone(),
+            dry_run: s.dry_run,
+            order_id: placed.order_id.clone(),
+            message: placed.message.clone(),
+            manual: true,
+        };
+        self.hub.emit(Event::Order { order: order.clone() });
+        if !placed.ok {
+            bail!("order {}: {}", placed.status, placed.message.unwrap_or_default());
+        }
+        self.hub.emit(Event::PositionsChanged);
+        self.hub.emit(Event::StatsChanged);
+        Ok(order)
     }
 
     async fn candidate(&self, s: &Settings, reference: &str) -> Result<Candidate> {

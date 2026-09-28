@@ -26,7 +26,8 @@ jevmarket daemon --bind 127.0.0.1:8787 --base-path /jevmarket   # behind a proxy
 - **Pause** stops scheduling and ends a running pass after its current market. An order in flight is always finished and logged.
 - **Shutdown** on Ctrl-C or SIGTERM works the same way: the current market finishes, the event streams close, the process exits.
 - **Decide** and **Refresh brief** in the console do what `decide` and `research --fresh` do. Deciding never places an order.
-- Cancelling open orders is not offered: the executor cannot cancel orders, and the console adds no trading capabilities the CLI lacks.
+- **Order** on a market's sheet places a manual limit BUY on the current book, whatever the signal said: pick the outcome, limit price and amount. It overrides the one-order-per-market rule and the per-pass trade count, never `max_usd_per_trade` or `max_open_exposure_usd`, and follows the effective dry-run setting. Manual orders are logged in `orders` with `source = 'manual'` (the bot writes `bot`) and marked in the order log and activity feed.
+- Cancelling open orders is not offered: the executor cannot cancel orders.
 
 Without an OpenRouter key the console, positions (for a configured `polymarket_wallet`) and all stored data still work; passes and decisions fail with the missing-key message until one is set.
 
@@ -35,7 +36,7 @@ Without an OpenRouter key the console, positions (for a configured `polymarket_w
 The console has no login. These rules stand in for one:
 
 - **Secrets never leave the process.** The API reports only whether `openrouter_api_key` and `polymarket_private_key` are set. They can be replaced or cleared from the console, never read.
-- **Real money needs a typed confirmation.** Switching `dry_run` off, starting a pass or resuming the loop while dry runs are off is refused with `428` unless the request carries `"confirm": "LIVE"`. The console asks you to type it.
+- **Real money needs a typed confirmation.** Switching `dry_run` off, starting a pass, resuming the loop or placing a manual order while dry runs are off is refused with `428` unless the request carries `"confirm": "LIVE"`. The console asks you to type it.
 - **Writes must come from the console's own origin.** Requests that change anything are refused when `Origin` differs from the host the request was sent to, or when the browser marks them `Sec-Fetch-Site: cross-site`. They must also be JSON, which a page on another site cannot send without a CORS preflight the daemon never answers.
 - **Unknown host names are refused.** Without a proxy, the daemon only answers to `localhost` and IP addresses, which stops DNS rebinding attacks from a web page. Behind a proxy, the proxy must set `X-Forwarded-Host`.
 - **Config changes go through the same validation as `config set`**, with errors reported per setting.
@@ -100,7 +101,8 @@ All endpoints are under `<base-path>/api/`, take and return JSON, and report err
 | `GET briefs/{id}` | One brief in full, with freshness and the midpoint then and now |
 | `POST briefs/refresh` | `{"reference": "slug or URL"}`: research the market again |
 | `POST decide` | `{"reference": "slug or URL", "fresh"?: bool}`: research, ask Jev, log. Never trades |
-| `GET orders` | Orders the bot logged, live and dry-run |
+| `GET orders` | Orders the bot and the console logged, live and dry-run, with `manual` set for console orders |
+| `POST orders` | `{"reference": "slug or URL", "outcome": "YES" or "NO", "price": 0.42, "usd": 5, "confirm"?: "LIVE"}`: place a manual limit BUY. Refused and rejected orders answer `422` |
 | `GET positions` | Balance, positions, open orders and exposure against the cap, read from Polymarket |
 | `GET stats` | Everything `stats` shows, plus reliability bins and cumulative PnL over time |
 | `POST pass` | `{"confirm"?: "LIVE"}`: start a pass now |

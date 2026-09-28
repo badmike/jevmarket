@@ -60,13 +60,16 @@ const describe = (e: ActivityEvent): Line => {
         to: { name: 'markets', params: { slug: r.slug } },
       }
     }
-    case 'order':
+    case 'order': {
+      const o = e.order
+      const kind = [o.manual && 'manual', o.dry_run ? 'dry-run order' : 'order'].filter(Boolean).join(' ')
       return {
-        ts: e.order.ts,
+        ts: o.ts,
         icon: 'lucide:receipt',
-        tone: e.order.status === 'rejected' || e.order.status === 'refused' ? 'text-destructive' : 'text-accent',
-        text: `${e.order.dry_run ? 'Dry-run order' : 'Order'} ${e.order.status}: BUY ${e.order.outcome} ${e.order.size} @ ${prob(e.order.price, 3)} (${usd(e.order.usd)}) on ${e.order.slug}${e.order.message ? `, ${e.order.message}` : ''}`,
+        tone: o.status === 'rejected' || o.status === 'refused' ? 'text-destructive' : 'text-accent',
+        text: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} ${o.status}: BUY ${o.outcome} ${o.size} @ ${prob(o.price, 3)} (${usd(o.usd)}) on ${o.slug}${o.message ? `, ${o.message}` : ''}`,
       }
+    }
     case 'brief':
       return {
         ts: e.brief.ts,
