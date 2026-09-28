@@ -28,6 +28,36 @@ The console is an installable web app: add it to the home screen and it opens fu
 
 Browsers only install web apps served over HTTPS, so put the daemon behind a TLS proxy as described in [Behind nginx with TLS](#behind-nginx-with-tls), and install from that address. The app needs the daemon to be reachable: it shows live data and does nothing offline.
 
+## Run it as a service
+
+`jevmarket service install` runs the daemon at login and restarts it after a crash: a launchd agent on macOS, a systemd user unit on Linux. Everything after `install` is passed to `jevmarket daemon`, so the flags above work:
+
+```bash
+jevmarket service install --dry-run --loop 600   # install and start; run again to change the flags
+jevmarket service restart                        # after upgrading jevmarket
+jevmarket service status                         # running or not, and where the logs are
+jevmarket service uninstall                      # stop and remove; config and database stay
+```
+
+| | macOS | Linux |
+|---|---|---|
+| Service file | `~/Library/LaunchAgents/com.coderscantina.jevmarket.plist` | `~/.config/systemd/user/jevmarket.service` |
+| Logs | `~/Library/Logs/jevmarket.log` | `journalctl --user -u jevmarket -f` |
+
+- **The service reads the config file only.** It does not see your shell's environment, so keys exported as `OPENROUTER_API_KEY` or `POLYMARKET_PRIVATE_KEY` are missing there. `install` warns about each one; store them with `jevmarket init` or `config set`. The config file in use when you run `install` (including `--config` or `JEVMARKET_CONFIG`) is the one the service gets.
+- **A live service starts paused** after every start, reboot and restart, like any live daemon. Resume it in the console.
+- **On Linux**, a user service stops when you log out. `install` tells you when that applies; `sudo loginctl enable-linger $USER` keeps it running.
+- **Installed with Homebrew**, the service points at the `bin/jevmarket` link, so upgrades keep working. The running process keeps the old binary until `jevmarket service restart`; open consoles reload themselves when it comes back.
+
+## Install the console on a phone
+
+The console is an installable web app: add it to the home screen and it opens full screen with its own icon, like a native app.
+
+- **iOS and iPadOS**: open the console in Safari, Share, Add to Home Screen.
+- **Android**: open it in Chrome, menu, Install app (or Add to home screen).
+
+Browsers only install web apps served over HTTPS, so put the daemon behind a TLS proxy as described in [Behind nginx with TLS](#behind-nginx-with-tls), and install from that address. The app needs the daemon to be reachable: it shows live data and does nothing offline.
+
 ## What it does
 
 - **Passes** run every `--loop` seconds, exactly as `run --loop` does: resolutions are refreshed, markets scanned and ranked, decided `concurrency` at a time, and orders placed one at a time under the hard caps. Settings are read from the config file at the start of every pass, so changes made in the console apply to the next one.

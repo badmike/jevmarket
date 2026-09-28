@@ -36,13 +36,20 @@ pub struct Args {
     every: u64,
     /// Evaluate and log, but place no orders, whatever the config says.
     #[arg(long)]
-    dry_run: bool,
+    pub dry_run: bool,
     /// Max candidate markets per pass.
     #[arg(short = 'n', long, default_value_t = 20)]
     limit: usize,
     /// URL prefix when a reverse proxy serves the console under a sub-path, e.g. `/jevmarket`.
     #[arg(long, value_name = "PATH", default_value = "", value_parser = parse_base_path)]
     base_path: String,
+}
+
+impl Args {
+    /// Where the console answers, as the startup log line prints it.
+    pub fn console_url(&self) -> String {
+        format!("http://{}{}/", self.bind, self.base_path)
+    }
 }
 
 /// What the command line fixed for the daemon's lifetime.

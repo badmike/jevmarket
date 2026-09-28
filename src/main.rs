@@ -11,6 +11,7 @@ mod openrouter;
 mod pipeline;
 mod relayer;
 mod research;
+mod service;
 mod signal;
 mod store;
 mod ui;
@@ -128,6 +129,11 @@ enum Command {
     },
     /// Run the trading loop in the background and serve a live web console for it.
     Daemon(daemon::Args),
+    /// Run the daemon as a login service: launchd on macOS, systemd on Linux.
+    Service {
+        #[command(subcommand)]
+        action: service::Action,
+    },
     /// Inspect or edit the config file.
     Config {
         #[command(subcommand)]
@@ -183,6 +189,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Config { action } => return config_cmd(&paths, action),
         Command::Init => return onboard::run(&paths).await,
         Command::Daemon(args) => return daemon::run(paths, args).await,
+        Command::Service { action } => return service::run(&paths, action),
         _ => {}
     }
     let s = Settings::load(&paths.config)?;
@@ -211,7 +218,9 @@ async fn dispatch(cli: Cli) -> Result<()> {
             println!("{n} new resolutions");
             Ok(())
         }
-        Command::Config { .. } | Command::Init | Command::Daemon(_) => unreachable!("handled above"),
+        Command::Config { .. } | Command::Init | Command::Daemon(_) | Command::Service { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 

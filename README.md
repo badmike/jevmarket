@@ -192,6 +192,7 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `decide <slug\|url> [--show-state] [--no-research] [--fresh]` | Research, ask Jev, show the proposed trade. Never places orders, always logs the decision |
 | `run [--dry-run] [--max-trades N] [-n 20] [--loop SECS] [--no-research]` | The full pipeline. **Live by default** |
 | `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
+| `service install [DAEMON FLAGS]\|uninstall\|restart\|status` | Run the daemon as a login service: launchd on macOS, systemd on Linux. See [Run it as a service](docs/daemon.md#run-it-as-a-service) |
 | `resolve` | Fetch outcomes of decided or ordered markets that resolved since the last check. `run` does this at the start of every pass |
 | `setup` | Create the deposit wallet, approve the exchange contracts, point `polymarket_deposit_wallet` at it and show where to fund it. Safe to run again |
 | `transfer <deposit\|proxy> <amount\|all>` | Move pUSD from that wallet to your other one (deposit wallet and polymarket.com wallet), without gas. Asks first unless `--yes` |
@@ -286,6 +287,7 @@ src/
   executor.rs    caps, order placement, positions, approvals
   store.rs       SQLite log, research cache, resolutions, calibration and PnL
   ui.rs          tables and colored output
+  service.rs     `service`: the daemon as a launchd agent or systemd user unit
 ```
 
 Polymarket access goes through [`polymarket_client_sdk_v2`](https://crates.io/crates/polymarket_client_sdk_v2), Polymarket's own Rust SDK (Gamma, Data API, CLOB, EIP-712 order signing). On-chain approvals use [`alloy`](https://alloy.rs). OpenRouter is plain HTTPS through `reqwest`; there is no other AI provider.
