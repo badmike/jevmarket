@@ -1,0 +1,58 @@
+<!doctype html>
+<html
+  lang="en"
+  class="h-full"
+>
+  <head>
+    <!-- The daemon rewrites this to its --base-path; every URL in the app is relative to it. -->
+    <base href="/" />
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta
+      name="color-scheme"
+      content="light dark"
+    />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: light)"
+      content="#f0f1f4"
+    />
+    <meta
+      name="theme-color"
+      media="(prefers-color-scheme: dark)"
+      content="#16171b"
+    />
+    <link
+      rel="icon"
+      href="./favicon.svg"
+      type="image/svg+xml"
+    />
+    <title>jevmarket</title>
+    <!-- Applies the stored colour mode before first paint; the key is shared with
+         src/composables/useColorMode.ts. -->
+    <script>
+      ;(function () {
+        try {
+          var mode = localStorage.getItem('jevmarket:color-mode') || 'system'
+          var dark =
+            mode === 'dark' ||
+            (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+          document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+        } catch (e) {}
+      })()
+    </script>
+    <script type="module" crossorigin src="./assets/index-BOM6qTfc.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/vue-b7QpSDdq.js">
+    <link rel="modulepreload" crossorigin href="./assets/Icon-C-6fFwPu.js">
+    <link rel="modulepreload" crossorigin href="./assets/query-CjO80jNo.js">
+    <link rel="modulepreload" crossorigin href="./assets/reka-D8TieFeG.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-D4LHR6Ac.css">
+  </head>
+  <body class="h-full bg-surface text-foreground antialiased">
+    <div id="app"></div>
+  </body>
+</html>

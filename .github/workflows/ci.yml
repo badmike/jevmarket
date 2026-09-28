@@ -30,3 +30,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run lint
+      - run: bun run build
+      - name: web/dist matches the source
+        run: |
+          git add -N dist
+          git diff --exit-code --stat -- dist || { echo "::error::web/dist is stale: run 'bun run build' in web/ and commit it"; exit 1; }

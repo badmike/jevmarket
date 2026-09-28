@@ -5,3 +5,4 @@
 *.db-shm
 config.json
 .DS_Store
+/web/node_modules

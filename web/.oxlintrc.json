@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "vue", "oxc", "import"],
+  "categories": {
+    "correctness": "warn"
+  },
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-unsafe-optional-chaining": "warn",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-floating-promises": "warn",
+    "typescript/await-thenable": "warn",
+    "typescript/no-unsafe-declaration-merging": "warn",
+    "unicorn/prefer-string-starts-ends-with": "warn",
+    "unicorn/no-useless-spread": "warn",
+    "import/no-cycle": "warn"
+  },
+  "env": {
+    "builtin": true,
+    "browser": true,
+    "es2024": true
+  },
+  "ignorePatterns": ["**/node_modules", "dist", "src/types/*.d.ts", "src/generated"]
+}
