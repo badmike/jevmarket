@@ -117,7 +117,7 @@ impl Default for Settings {
             research_model: "deepseek/deepseek-v4-pro-0813".into(),
             research_ttl_hours: 6.0,
             max_research_per_run: 20,
-            research_max_results: 8,
+            research_max_results: 5,
             research_max_chars: 2500,
             research_exclude_domains: DEFAULT_EXCLUDE_DOMAINS.map(String::from).to_vec(),
             concurrency: 4,

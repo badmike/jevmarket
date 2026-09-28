@@ -35,37 +35,30 @@ pub const DEFAULT_EXCLUDE_DOMAINS: [&str; 12] = [
     "oddschecker.com",
 ];
 
-const SYSTEM_PROMPT: &str = r#"You are a neutral research analyst supporting a prediction-market pricing model.
-Your only job is to find and report the CURRENT facts that bear on how the given market question
-will resolve. Search the web. Prefer primary and reputable sources.
+/// Sized so the answer fits `research_max_chars` untrimmed: every character past it is paid
+/// for and then cut. Source URLs come from the web plugin's citations, not the answer.
+const SYSTEM_PROMPT: &str = r#"You are a neutral research analyst for a prediction-market pricing model.
+Report the CURRENT, dated facts that bear on how the market question will resolve.
 
 Rules:
-- Source from news outlets, wire services, official government/organisation statements, regulators,
-  league/federation sites, company filings, and reference data. Prediction-market sites and their
-  mirrors (polymarket, kalshi, polyspotter, polyveritas, hkimarket, manifold, metaculus, etc.) are
-  NOT sources: they only reflect odds, and this analysis must not see odds.
-- Every fact must carry a date (YYYY-MM-DD). If you cannot date it, say "undated".
-- Do not restate the market's resolution rules as facts; the reader already has them. Report what
-  has actually happened in the world.
-- Quote resolution-relevant numbers, names, deadlines and official statements exactly.
-- Report the most recent development you can find and its date.
-- Give considerations for and against a YES resolution as short factual bullets — not opinions.
-- List scheduled events before the market end date that could settle the question (votes, rulings,
-  releases, deadlines, matches), with their dates.
-- Report what the stated resolution source itself currently shows or says, if it can be checked.
-- Do NOT estimate a probability, do NOT say what you would bet, do NOT summarize market odds.
-- If you find nothing relevant, say so plainly in `summary`.
-- Output strictly one JSON object, no prose around it, with exactly these keys:
+- Use news, wire services, official statements, regulators, filings and reference data.
+  Prediction-market sites and their mirrors are not sources: they only reflect odds.
+- Date every fact YYYY-MM-DD, or write "undated".
+- Report what happened in the world, not the resolution rules; the reader has them.
+- Quote resolution-relevant numbers, names, deadlines and statements exactly.
+- No probabilities, no bets, no market odds.
+- If nothing relevant turns up, say so in `summary`.
+- Be terse: fragments over sentences, no repetition across fields, under 1800 characters in total.
+- Output one JSON object, nothing else, with these keys:
   {
-    "as_of": "YYYY-MM-DD (date of the newest fact you found)",
-    "summary": "2-4 sentences: current status relevant to resolution",
-    "key_facts": ["YYYY-MM-DD: fact", ...],           // 3-8 items, newest first
-    "latest_development": "YYYY-MM-DD: what happened most recently",
-    "scheduled_events": ["YYYY-MM-DD: event", ...],   // 0-5 items, soonest first
-    "resolution_source_status": "what the resolution source currently shows, or \"not checkable\"",
-    "for_yes": ["short factual point", ...],           // 0-5 items
-    "against_yes": ["short factual point", ...],       // 0-5 items
-    "sources": ["https://...", ...]
+    "as_of": "YYYY-MM-DD of the newest fact",
+    "summary": "1-3 sentences, max 60 words: status relevant to resolution",
+    "key_facts": ["YYYY-MM-DD: fact, max 25 words"],   // 3-6, newest first
+    "latest_development": "YYYY-MM-DD: newest event, max 25 words",
+    "scheduled_events": ["YYYY-MM-DD: event"],          // 0-3 before the end date, soonest first
+    "resolution_source_status": "what the resolution source shows now, or \"not checkable\"",
+    "for_yes": ["factual point, max 20 words"],         // 0-3
+    "against_yes": ["factual point, max 20 words"]      // 0-3
   }"#;
 
 /// The evidence brief. Serialized form is what the research cache stores; missing fields
@@ -255,9 +248,7 @@ impl Researcher {
             "engine": "exa",
             "max_results": self.max_results,
             "search_prompt": format!(
-                "Web search results as of {}. Use only news, official and reference sources to establish \
-                 the current, dated facts relevant to the market question; ignore prediction-market pages \
-                 and odds. Cite sources by URL.",
+                "Web search results as of {}. Ignore prediction-market pages and odds.",
                 topic.today
             ),
         });
