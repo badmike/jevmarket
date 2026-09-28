@@ -73,17 +73,25 @@ CREATE TABLE IF NOT EXISTS resolutions (
     resolved_at TEXT,
     ts REAL NOT NULL
 );
+-- Markets a person asked the price watch to keep an eye on.
+CREATE TABLE IF NOT EXISTS watchlist (
+    slug TEXT PRIMARY KEY,
+    condition_id TEXT NOT NULL,
+    question TEXT,
+    ts REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_decisions_slug ON decisions(slug);
 CREATE INDEX IF NOT EXISTS idx_orders_condition ON orders(condition_id);
 ";
 
 /// Columns added after a table was first shipped. `CREATE TABLE IF NOT EXISTS` leaves older
 /// files as they are, so these are added on open when missing.
-const ADDED_COLUMNS: [(&str, &str, &str); 4] = [
+const ADDED_COLUMNS: [(&str, &str, &str); 5] = [
     ("research", "midpoint", "REAL"),
     ("orders", "source", "TEXT"),
     ("decisions", "skip_code", "TEXT"),
     ("orders", "question", "TEXT"),
+    ("decisions", "image", "TEXT"),
 ];
 
 /// Skip codes for decisions logged before `skip_code` existed, read off the reason text.
@@ -104,11 +112,17 @@ WHERE action = 'skip' AND skip_code IS NULL";
 /// Orders in these states never reached the book.
 const DEAD_STATUSES: &str = "('failed','rejected')";
 
+/// `-1` for a SELL row of `orders o`, `1` for a BUY: proceeds and shares sold count against the stake
+/// and the payout.
+const SIGN: &str = "(CASE o.side WHEN 'SELL' THEN -1 ELSE 1 END)";
+
 #[derive(Debug)]
 pub struct DecisionRow<'a> {
     pub slug: &'a str,
     pub condition_id: &'a str,
     pub question: &'a str,
+    /// The market's thumbnail URL.
+    pub image: Option<&'a str>,
     pub state: &'a Value,
     /// `None` when only the clarity pre-screen ran.
     pub p_yes: Option<f64>,
@@ -134,6 +148,8 @@ pub struct OrderRow<'a> {
     pub condition_id: &'a str,
     pub token_id: &'a str,
     pub outcome: &'a str,
+    /// A SELL of held shares; a BUY otherwise.
+    pub sell: bool,
     pub price: f64,
     pub size: f64,
     pub usd: f64,
@@ -288,8 +304,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO decisions (ts, slug, condition_id, question, state_json, p_yes, answerable, clarity,
                 yes_ask, no_ask, midpoint, edge, action, reason, jev_model, jev_cost, research_cost, raw_json,
-                skip_code)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                skip_code, image)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 now(),
                 r.slug,
@@ -310,6 +326,7 @@ impl Store {
                 r.research_cost,
                 r.raw.to_string(),
                 r.skip_code,
+                r.image,
             ],
         )?;
         Ok(())
@@ -319,7 +336,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO orders (ts, slug, condition_id, token_id, outcome, side, price, size, usd, order_id,
                 status, dry_run, response_json, source, question)
-             VALUES (?1, ?2, ?3, ?4, ?5, 'BUY', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?15, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 now(),
                 r.slug,
@@ -335,6 +352,7 @@ impl Store {
                 r.response.map(Value::to_string),
                 if r.manual { "manual" } else { "bot" },
                 Some(r.question).filter(|q| !q.is_empty()),
+                if r.sell { "SELL" } else { "BUY" },
             ],
         )?;
         Ok(())
@@ -410,11 +428,12 @@ impl Store {
         Ok(calibrate(&rows))
     }
 
-    /// PnL of live (`dry_run = false`) or dry-run orders on resolved markets.
+    /// PnL of live (`dry_run = false`) or dry-run orders on resolved markets. A sale's proceeds
+    /// come off the stake, and the shares it sold no longer pay out.
     pub fn pnl(&self, dry_run: bool) -> Result<Pnl> {
         let sql = format!(
-            "SELECT COUNT(*), COUNT(r.yes_price), COALESCE(SUM(CASE WHEN r.yes_price IS NOT NULL THEN o.usd END), 0),
-                    COALESCE(SUM(o.size * CASE o.outcome WHEN 'YES' THEN r.yes_price ELSE 1 - r.yes_price END), 0)
+            "SELECT COUNT(*), COUNT(r.yes_price), COALESCE(SUM(CASE WHEN r.yes_price IS NOT NULL THEN {SIGN} * o.usd END), 0),
+                    COALESCE(SUM({SIGN} * o.size * CASE o.outcome WHEN 'YES' THEN r.yes_price ELSE 1 - r.yes_price END), 0)
              FROM orders o LEFT JOIN resolutions r ON r.condition_id = o.condition_id
              WHERE o.dry_run = ?1 AND o.status NOT IN {DEAD_STATUSES}"
         );
@@ -438,6 +457,30 @@ impl Store {
         Ok(Spend { jev_calls, jev_usd, briefs, research_usd })
     }
 
+    /// A SELL that reached the book (or would have, with `include_dry_run`) on this market.
+    pub fn has_sell_for(&self, condition_id: &str, include_dry_run: bool) -> Result<bool> {
+        let dry = if include_dry_run { "" } else { " AND dry_run = 0" };
+        let sql = format!(
+            "SELECT EXISTS(SELECT 1 FROM orders WHERE condition_id = ?1 AND side = 'SELL'
+                           AND status NOT IN {DEAD_STATUSES}{dry})"
+        );
+        Ok(self.conn.query_row(&sql, [condition_id], |row| row.get(0))?)
+    }
+
+    /// Keep an eye on a market in the price watch, whatever its view's age.
+    pub fn watch(&self, slug: &str, condition_id: &str, question: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO watchlist (slug, condition_id, question, ts) VALUES (?1, ?2, ?3, ?4)",
+            params![slug, condition_id, question, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the market was on the watchlist.
+    pub fn unwatch(&self, slug: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM watchlist WHERE slug = ?1", [slug])? > 0)
+    }
+
     pub fn has_order_for(&self, condition_id: &str, include_dry_run: bool) -> Result<bool> {
         let dry = if include_dry_run { "" } else { " AND dry_run = 0" };
         let sql = format!(
@@ -458,7 +501,7 @@ impl Store {
             })?;
         let (live_orders, live_usd) = self.conn.query_row(
             &format!(
-                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status NOT IN {DEAD_STATUSES} THEN usd END), 0)
+                "SELECT COUNT(*), COALESCE(SUM(CASE WHEN status NOT IN {DEAD_STATUSES} AND side IS NOT 'SELL' THEN usd END), 0)
                  FROM orders WHERE dry_run = 0"
             ),
             [],
@@ -554,6 +597,7 @@ mod tests {
             slug: "a",
             condition_id: "c",
             question: "Q?",
+            image: None,
             state: &state,
             p_yes: None,
             answerable: None,
@@ -595,6 +639,7 @@ mod tests {
             slug: "a",
             condition_id: "c",
             question: "Q?",
+            image: None,
             state: &state,
             p_yes: None,
             answerable: None,
@@ -641,6 +686,7 @@ mod tests {
             slug: "a",
             condition_id: "c1",
             question: "Q?",
+            image: None,
             state: &state,
             p_yes: Some(0.6),
             answerable: Some(0.9),
@@ -718,6 +764,7 @@ mod tests {
             slug: condition_id,
             condition_id,
             question: "Q?",
+            image: None,
             state: &state,
             p_yes: Some(p_yes),
             answerable: Some(0.9),
@@ -795,5 +842,10 @@ mod tests {
         );
         let dry = st.pnl(true).unwrap();
         assert_eq!((dry.orders, dry.resolved, dry.pnl_usd), (1, 1, -4.0));
+
+        st.log_order(&OrderRow { sell: true, price: 0.7, usd: 7.0, ..order("lost", "NO", false) }).unwrap();
+        assert!(st.has_sell_for("lost", false).unwrap() && !st.has_sell_for("won", true).unwrap());
+        let live = st.pnl(false).unwrap();
+        assert_eq!((live.staked_usd, live.payout_usd, live.pnl_usd), (1.0, 10.0, 9.0), "sold the loser at 0.70");
     }
 }

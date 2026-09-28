@@ -81,6 +81,7 @@ pub struct Book {
     pub no_token_id: U256,
     pub yes_bid: Option<f64>,
     pub yes_ask: Option<f64>,
+    pub no_bid: Option<f64>,
     pub no_ask: Option<f64>,
     pub tick_size: f64,
     pub min_order_size: f64,
@@ -106,12 +107,18 @@ pub enum Outcome {
     No,
 }
 
-impl std::fmt::Display for Outcome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
+impl Outcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
             Self::Yes => "YES",
             Self::No => "NO",
-        })
+        }
+    }
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -168,6 +175,8 @@ pub enum SkipCode {
     MinOrderTooBig,
     /// A trade signal on a cached brief that could not be researched again.
     StaleBrief,
+    /// A price-watch signal after a price move, when Jev could not be asked again.
+    StaleView,
 }
 
 impl SkipCode {
@@ -182,6 +191,7 @@ impl SkipCode {
             Self::ZeroStake => "zero_stake",
             Self::MinOrderTooBig => "min_order_too_big",
             Self::StaleBrief => "stale_brief",
+            Self::StaleView => "stale_view",
         }
     }
 }
@@ -297,6 +307,112 @@ pub fn evaluate(view: &JevView, book: &Book, s: &Settings) -> Verdict {
     })
 }
 
+/// The highest ask at which [`evaluate`] buys a side Jev gives probability `p`: on the book's
+/// tick, inside the trade band and at least `min_edge` below `p`, with the same float comparison.
+/// `None` when no ask in the band leaves that edge. Sizing is left out.
+pub fn trigger_price(p: f64, tick: f64, s: &Settings) -> Option<f64> {
+    let tick = if tick > 0.0 { tick } else { 0.01 };
+    let highest = (p - s.min_edge).min(s.max_trade_price);
+    let mut ask = round_to_tick((highest / tick + 1e-9).floor() * tick, tick);
+    if p - ask < s.min_edge {
+        ask = round_to_tick(ask - tick, tick);
+    }
+    (s.min_trade_price..=s.max_trade_price).contains(&ask).then_some(ask)
+}
+
+/// Shares the wallet holds in one outcome of a market.
+#[derive(Debug, Clone)]
+pub struct Holding {
+    pub outcome: Outcome,
+    pub token_id: U256,
+    pub size: f64,
+    /// What a share cost on average.
+    pub avg_price: f64,
+}
+
+/// A SELL of a whole holding at the best bid, before the market resolves.
+#[derive(Debug, Clone)]
+pub struct Exit {
+    pub outcome: Outcome,
+    pub token_id: U256,
+    /// Limit price: the best bid.
+    pub price: f64,
+    pub size: f64,
+    /// Proceeds, `price * size`.
+    pub usd: f64,
+    /// `price - p`: how much a share sold now beats what Jev expects it to pay at resolution.
+    pub edge: f64,
+    pub rationale: String,
+}
+
+impl Holding {
+    fn p(&self, view: &JevView) -> f64 {
+        match self.outcome {
+            Outcome::Yes => view.p_yes,
+            Outcome::No => 1.0 - view.p_yes,
+        }
+    }
+}
+
+/// Float slack on the exit limits, so a bid of 0.45 over a probability of 0.40 meets a 0.05 margin.
+const EXIT_TOLERANCE: f64 = 1e-9;
+
+/// Sell a holding early only when both hold: the best bid beats Jev's probability of the held side
+/// by `min_exit_edge` (the market pays more now than Jev expects the shares to be worth at
+/// resolution), and it returns at least `min_exit_profit` on what the shares cost. A view that
+/// fails the answerable or clarity gate is not trusted to sell on. Otherwise the reason to hold.
+pub fn evaluate_exit(view: &JevView, book: &Book, h: &Holding, s: &Settings) -> Result<Exit, String> {
+    if view.answerable < s.min_answerable || view.clarity < s.min_clarity {
+        return Err("Jev's view fails the answerable or clarity gate".into());
+    }
+    let bid = match h.outcome {
+        Outcome::Yes => book.yes_bid,
+        Outcome::No => book.no_bid,
+    };
+    let bid = bid.ok_or("nobody is buying")?;
+    let (p, outcome) = (h.p(view), h.outcome);
+    let edge = bid - p;
+    if edge < s.min_exit_edge - EXIT_TOLERANCE {
+        return Err(format!("bid {bid:.2} is {edge:+.3} over Jev's P({outcome})={p:.2}, below {}", s.min_exit_edge));
+    }
+    if h.avg_price <= 0.0 || bid < h.avg_price * (1.0 + s.min_exit_profit) - EXIT_TOLERANCE {
+        return Err(format!("bid {bid:.2} on a {:.2} entry returns less than {}", h.avg_price, s.min_exit_profit));
+    }
+    let size = (h.size * 100.0).floor() / 100.0;
+    if size < book.min_order_size {
+        return Err(format!("{size} shares are below the minimum order of {}", book.min_order_size));
+    }
+    Ok(Exit {
+        outcome,
+        token_id: h.token_id,
+        price: bid,
+        size,
+        usd: (bid * size * 1e4).round() / 1e4,
+        edge,
+        rationale: format!(
+            "sell {outcome} at bid {bid:.2}: Jev P({outcome})={p:.2}, edge {edge:+.2}, bought at {:.2}",
+            h.avg_price
+        ),
+    })
+}
+
+/// The lowest bid at which [`evaluate_exit`] sells a holding Jev gives probability `p`, on the
+/// book's tick. `None` when no bid below 1 would.
+pub fn exit_trigger(p: f64, avg_price: f64, tick: f64, s: &Settings) -> Option<f64> {
+    let tick = if tick > 0.0 { tick } else { 0.01 };
+    let passes = |bid: f64| {
+        bid - p >= s.min_exit_edge - EXIT_TOLERANCE
+            && avg_price > 0.0
+            && bid >= avg_price * (1.0 + s.min_exit_profit) - EXIT_TOLERANCE
+    };
+    let lowest = (p + s.min_exit_edge).max(avg_price * (1.0 + s.min_exit_profit));
+    let mut bid = round_to_tick((lowest / tick - 1e-9).ceil() * tick, tick);
+    if !passes(bid) {
+        bid = round_to_tick(bid + tick, tick);
+    }
+    (bid < 1.0 && passes(bid)).then_some(bid)
+}
+
 /// A BUY a person asked for: about `usd` of `outcome` at limit `price`. Jev's probability plays
 /// no part, so the edge is zero; the executor's money caps still apply.
 pub fn manual_trade(book: &Book, outcome: Outcome, price: f64, usd: f64) -> Result<Trade, String> {
@@ -338,6 +454,7 @@ mod tests {
             no_token_id: NO,
             yes_bid: Some(yes_bid),
             yes_ask: Some(yes_ask),
+            no_bid: Some(((1.0 - yes_ask) * 1e4).round() / 1e4),
             no_ask: Some(((1.0 - yes_bid) * 1e4).round() / 1e4),
             tick_size: 0.01,
             min_order_size: min_size,
@@ -438,6 +555,60 @@ mod tests {
         assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 1.2, 4.0).is_err());
         assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 0.004, 4.0).is_err(), "rounds to zero");
         assert!(manual_trade(&book(0.40, 0.38, 5.0), Outcome::Yes, 0.4, 0.0).is_err());
+    }
+
+    #[test]
+    fn trigger_is_the_highest_ask_evaluate_buys() {
+        let s = Settings::default();
+        let yes_only = |ask: f64| Book { no_ask: None, ..book(ask, ask - 0.01, 5.0) };
+        let buys = |p: f64, ask: f64| matches!(evaluate(&view(p, 0.9, 3), &yes_only(ask), &s), Verdict::Trade(_));
+        for cents in 18..=99 {
+            let p = f64::from(cents) / 100.0 + 0.004;
+            let trigger = trigger_price(p, 0.01, &s).unwrap();
+            assert!(buys(p, trigger), "p={p} buys at {trigger}");
+            assert!(!buys(p, trigger + 0.01), "p={p} does not buy above {trigger}");
+        }
+        assert_eq!(trigger_price(0.65, 0.01, &s), Some(0.57));
+        assert_eq!(trigger_price(0.99, 0.01, &s), Some(0.90), "capped by max_trade_price");
+        assert_eq!(trigger_price(0.15, 0.01, &s), None, "no ask in the band leaves the edge");
+    }
+
+    #[test]
+    fn exits_only_when_the_bid_beats_jev_and_pays_off() {
+        let s = Settings::default();
+        let yes = Holding { outcome: Outcome::Yes, token_id: YES, size: 10.0, avg_price: 0.40 };
+        let exit = evaluate_exit(&view(0.58, 0.9, 3), &book(0.66, 0.65, 5.0), &yes, &s).unwrap();
+        assert_eq!((exit.token_id, exit.price, exit.size, exit.usd), (YES, 0.65, 10.0, 6.5));
+        assert!(
+            evaluate_exit(&view(0.62, 0.9, 3), &book(0.66, 0.65, 5.0), &yes, &s).is_err(),
+            "Jev still expects more"
+        );
+        let pricey = Holding { avg_price: 0.60, ..yes.clone() };
+        assert!(evaluate_exit(&view(0.50, 0.9, 3), &book(0.66, 0.65, 5.0), &pricey, &s).is_err(), "too little profit");
+        assert!(evaluate_exit(&view(0.58, 0.3, 3), &book(0.66, 0.65, 5.0), &yes, &s).is_err(), "untrusted view");
+        let no = Holding { outcome: Outcome::No, token_id: NO, ..yes };
+        let exit = evaluate_exit(&view(0.50, 0.9, 3), &book(0.35, 0.34, 5.0), &no, &s).unwrap();
+        assert_eq!((exit.token_id, exit.price), (NO, 0.65), "NO bid is 1 - YES ask");
+    }
+
+    #[test]
+    fn exit_trigger_is_the_lowest_bid_evaluate_exit_sells_at() {
+        let s = Settings::default();
+        let h = |avg_price| Holding { outcome: Outcome::Yes, token_id: YES, size: 10.0, avg_price };
+        let sells = |p: f64, avg: f64, bid: f64| {
+            let b = Book { yes_bid: Some(bid), ..book(bid + 0.01, bid, 5.0) };
+            evaluate_exit(&view(p, 0.9, 3), &b, &h(avg), &s).is_ok()
+        };
+        for cents in 10..=90 {
+            let p = f64::from(cents) / 100.0 + 0.004;
+            for avg in [0.2, 0.4, 0.6] {
+                let Some(trigger) = exit_trigger(p, avg, 0.01, &s) else { continue };
+                assert!(sells(p, avg, trigger), "p={p} avg={avg} sells at {trigger}");
+                assert!(!sells(p, avg, trigger - 0.01), "p={p} avg={avg} holds below {trigger}");
+            }
+        }
+        assert_eq!(exit_trigger(0.58, 0.40, 0.01, &s), Some(0.63));
+        assert_eq!(exit_trigger(0.97, 0.40, 0.01, &s), None);
     }
 
     #[test]

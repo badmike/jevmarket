@@ -1,4 +1,5 @@
-//! The daemon's shared state: the event bus, the loop status and the recent-activity buffer.
+//! The daemon's shared state: the event bus, the loop status, the recent-activity buffer and the
+//! price watch's last snapshot.
 //! Written by the engine thread and the log layer, read by HTTP handlers.
 
 use std::collections::VecDeque;
@@ -10,7 +11,7 @@ use tracing::{Level, Subscriber};
 use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 
-use super::api::{Event, LogLevel, Status};
+use super::api::{Event, LogLevel, Status, WatchItem};
 use super::now;
 
 /// Events a slow SSE client may fall behind by before it is told to resync.
@@ -21,6 +22,7 @@ pub struct Hub {
     tx: broadcast::Sender<Event>,
     status: Mutex<Status>,
     recent: Mutex<VecDeque<Event>>,
+    watchlist: Mutex<Vec<WatchItem>>,
 }
 
 impl Hub {
@@ -29,6 +31,7 @@ impl Hub {
             tx: broadcast::channel(BUS_CAPACITY).0,
             status: Mutex::new(status),
             recent: Mutex::new(VecDeque::with_capacity(RECENT)),
+            watchlist: Mutex::new(Vec::new()),
         })
     }
 
@@ -64,6 +67,20 @@ impl Hub {
             s.clone()
         };
         self.emit(Event::Status { status });
+    }
+
+    /// The watched markets as the last price-watch tick saw them.
+    pub fn watchlist(&self) -> Vec<WatchItem> {
+        lock(&self.watchlist).clone()
+    }
+
+    pub fn set_watchlist(&self, items: Vec<WatchItem>) {
+        *lock(&self.watchlist) = items;
+    }
+
+    /// Show a market as off the watchlist until the next tick decides whether it is still watched.
+    pub fn unpin(&self, slug: &str) {
+        lock(&self.watchlist).iter_mut().filter(|i| i.slug == slug).for_each(|i| i.pinned = false);
     }
 
     /// Activity since the daemon started, oldest first.

@@ -117,15 +117,11 @@ impl<'a> Pipeline<'a> {
                 }
             }
         }
-        if let Verdict::Trade(t) = &verdict
-            && t.edge > self.s.suspicious_edge
+        let verdict = distrust(verdict, self.s);
+        if let Verdict::Skip(why) = &verdict
+            && why.code == SkipCode::SuspiciousEdge
         {
-            tracing::warn!("{}: suspicious edge, {}", c.market.slug, t.rationale);
-            let reason = format!(
-                "edge {:+.3} > suspicious_edge {}: more likely a model error than a mispricing",
-                t.edge, self.s.suspicious_edge
-            );
-            verdict = Verdict::Skip(Skip { code: SkipCode::SuspiciousEdge, reason });
+            tracing::warn!("{}: {}", c.market.slug, why.reason);
         }
         Ok(Decided::Assessed(Box::new(a), verdict))
     }
@@ -191,6 +187,7 @@ impl<'a> Pipeline<'a> {
             slug: &c.market.slug,
             condition_id: &c.market.condition_id,
             question: &c.market.question,
+            image: c.market.image.as_deref(),
             state: &state,
             p_yes: None,
             answerable: None,
@@ -210,39 +207,11 @@ impl<'a> Pipeline<'a> {
         Ok(Some(reason))
     }
 
-    async fn assess(&self, c: &Candidate, brief: Option<Brief>, cached: bool) -> Result<Assessment> {
+    /// Ask Jev about the market with `brief` as evidence.
+    pub async fn assess(&self, c: &Candidate, brief: Option<Brief>, cached: bool) -> Result<Assessment> {
         let state = build_state(c, self.s, brief.as_ref());
         let view = ask_jev(&self.jev, &state).await?;
         Ok(Assessment { state, brief, cached, view })
-    }
-
-    pub fn log(&self, c: &Candidate, a: &Assessment, verdict: &Verdict, executed: bool) -> Result<()> {
-        let (action, edge, reason, skip_code) = match verdict {
-            Verdict::Trade(t) => {
-                (if executed { "trade" } else { "trade_unexecuted" }, Some(t.edge), t.rationale.as_str(), None)
-            }
-            Verdict::Skip(why) => ("skip", None, why.reason.as_str(), Some(why.code.as_str())),
-        };
-        self.store.log_decision(&DecisionRow {
-            slug: &c.market.slug,
-            condition_id: &c.market.condition_id,
-            question: &c.market.question,
-            state: &a.state,
-            p_yes: Some(a.view.p_yes),
-            answerable: Some(a.view.answerable),
-            clarity: a.view.clarity,
-            yes_ask: c.book.yes_ask,
-            no_ask: c.book.no_ask,
-            midpoint: c.book.midpoint(),
-            edge,
-            action,
-            skip_code,
-            reason,
-            jev_model: a.view.model.as_deref(),
-            jev_cost: a.view.cost,
-            research_cost: a.brief.as_ref().map(|b| b.cost),
-            raw: &a.view.raw,
-        })
     }
 
     pub fn reset_budget(&self) {
@@ -327,7 +296,7 @@ impl<'a> Pipeline<'a> {
                         Verdict::Trade(t) => Some(ex.place(&c, t, false).await?),
                         Verdict::Skip(_) => None,
                     };
-                    self.log(&c, &a, &verdict, placed.as_ref().is_some_and(|p| p.ok))?;
+                    log(store, &c, &a, &verdict, placed.as_ref().is_some_and(|p| p.ok))?;
                     on(Step::Decided { c: &c, a: &a, verdict: &verdict, placed: placed.as_ref() });
                 }
             }
@@ -337,6 +306,52 @@ impl<'a> Pipeline<'a> {
             }
         }
         Ok(())
+    }
+}
+
+/// Log an assessment and its verdict; `executed` when the trade's order went out.
+pub fn log(store: &Store, c: &Candidate, a: &Assessment, verdict: &Verdict, executed: bool) -> Result<()> {
+    let (action, edge, reason, skip_code) = match verdict {
+        Verdict::Trade(t) => {
+            (if executed { "trade" } else { "trade_unexecuted" }, Some(t.edge), t.rationale.as_str(), None)
+        }
+        Verdict::Skip(why) => ("skip", None, why.reason.as_str(), Some(why.code.as_str())),
+    };
+    store.log_decision(&DecisionRow {
+        slug: &c.market.slug,
+        condition_id: &c.market.condition_id,
+        question: &c.market.question,
+        image: c.market.image.as_deref(),
+        state: &a.state,
+        p_yes: Some(a.view.p_yes),
+        answerable: Some(a.view.answerable),
+        clarity: a.view.clarity,
+        yes_ask: c.book.yes_ask,
+        no_ask: c.book.no_ask,
+        midpoint: c.book.midpoint(),
+        edge,
+        action,
+        skip_code,
+        reason,
+        jev_model: a.view.model.as_deref(),
+        jev_cost: a.view.cost,
+        research_cost: a.brief.as_ref().map(|b| b.cost),
+        raw: &a.view.raw,
+    })
+}
+
+/// Skip a trade whose edge is above `suspicious_edge`: after fresh research that big a gap is more
+/// often the model than the market.
+pub fn distrust(verdict: Verdict, s: &Settings) -> Verdict {
+    match verdict {
+        Verdict::Trade(t) if t.edge > s.suspicious_edge => {
+            let reason = format!(
+                "edge {:+.3} > suspicious_edge {}: more likely a model error than a mispricing",
+                t.edge, s.suspicious_edge
+            );
+            Verdict::Skip(Skip { code: SkipCode::SuspiciousEdge, reason })
+        }
+        v => v,
     }
 }
 

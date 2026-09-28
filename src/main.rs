@@ -372,7 +372,7 @@ async fn decide(
         println!("{}", serde_json::to_string_pretty(&a.state)?);
     }
     ui::print_decision(&cand, &a, &verdict);
-    pipeline.log(&cand, &a, &verdict, false)
+    pipeline::log(&store, &cand, &a, &verdict, false)
 }
 
 async fn run(s: &Settings, paths: &Paths, limit: usize, every: Option<u64>, no_research: bool) -> Result<()> {

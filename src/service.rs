@@ -71,8 +71,11 @@ fn install(paths: &Paths, manager: Manager, flags: Vec<String>) -> Result<()> {
             println!("{var} is set in this shell, but the service does not see it: `jevmarket config set {key} ...`");
         }
     }
-    if !(settings.dry_run || daemon.dry_run) {
-        println!("Live mode: after every start the loop waits paused until you resume it in the console.");
+    if !(settings.dry_run || daemon.dry_run || daemon.autostart) {
+        println!(
+            "Live mode: after every start the loop waits paused until you resume it in the console. \
+             Install with `--autostart` to trade from boot."
+        );
     }
     Ok(())
 }

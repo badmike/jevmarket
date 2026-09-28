@@ -1,6 +1,7 @@
 //! Discover candidate Polymarket markets and turn them into compact Jev states.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
@@ -11,6 +12,7 @@ use polymarket_client_sdk_v2::gamma;
 use polymarket_client_sdk_v2::gamma::types::request::{EventBySlugRequest, MarketBySlugRequest, MarketsRequest};
 use polymarket_client_sdk_v2::types::{Decimal, U256};
 use rust_decimal::prelude::ToPrimitive;
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::config::Settings;
@@ -25,6 +27,8 @@ const PAGE_SIZE: i32 = 50;
 pub struct Market {
     pub slug: String,
     pub question: String,
+    /// Thumbnail URL, when Polymarket has one.
+    pub image: Option<String>,
     pub description: String,
     /// `0x`-prefixed hex, as used by every Polymarket API.
     pub condition_id: String,
@@ -60,6 +64,7 @@ impl TryFrom<&gamma::types::response::Market> for Market {
         Ok(Self {
             slug: m.slug.clone().unwrap_or_default(),
             question: m.question.clone().unwrap_or_default(),
+            image: image(m),
             description: m.description.as_deref().unwrap_or_default().trim().to_owned(),
             condition_id: condition_id.to_string(),
             end_date: m.end_date,
@@ -99,8 +104,13 @@ fn f(x: Option<Decimal>) -> Option<f64> {
     x.and_then(|d| d.to_f64())
 }
 
-/// Return a skip reason, or the market if it is a candidate.
-fn passes_static_filters(m: &gamma::types::response::Market, s: &Settings) -> Result<Market, String> {
+/// The square icon Polymarket lists markets with, else the header image.
+fn image(m: &gamma::types::response::Market) -> Option<String> {
+    [&m.icon, &m.image].into_iter().flatten().find(|url| !url.trim().is_empty()).cloned()
+}
+
+/// Open, taking orders, with a CLOB order book.
+fn tradable(m: &gamma::types::response::Market) -> Result<(), String> {
     let yes = |b: Option<bool>| b.unwrap_or(false);
     if !(yes(m.active) && yes(m.accepting_orders)) || yes(m.closed) || yes(m.archived) {
         return Err("not tradable".into());
@@ -108,6 +118,12 @@ fn passes_static_filters(m: &gamma::types::response::Market, s: &Settings) -> Re
     if !yes(m.enable_order_book) {
         return Err("no CLOB order book".into());
     }
+    Ok(())
+}
+
+/// Return a skip reason, or the market if it is a candidate.
+fn passes_static_filters(m: &gamma::types::response::Market, s: &Settings) -> Result<Market, String> {
+    tradable(m)?;
     let excluded = |label: &str| s.exclude_tags.iter().any(|t| t.eq_ignore_ascii_case(label));
     if let Some(tag) = m.tags.iter().flatten().filter_map(|t| t.label.as_deref()).find(|l| excluded(l)) {
         return Err(format!("tagged {tag}"));
@@ -146,6 +162,7 @@ fn book_for(m: &Market, books: &HashMap<U256, OrderBookSummaryResponse>) -> Book
         no_token_id: m.no_token,
         yes_bid: yb.and_then(|b| best(&b.bids, f64::max)),
         yes_ask: yb.and_then(|b| best(&b.asks, f64::min)),
+        no_bid: nb.and_then(|b| best(&b.bids, f64::max)),
         no_ask: nb.and_then(|b| best(&b.asks, f64::min)),
         tick_size: reference.and_then(|b| b.tick_size.as_decimal().to_f64()).unwrap_or(m.tick_size),
         min_order_size: reference.and_then(|b| b.min_order_size.to_f64()).unwrap_or(m.min_order_size),
@@ -238,6 +255,27 @@ pub async fn scan(
     Ok(out)
 }
 
+/// Tradable markets by condition id with their live books, bypassing the scan filters: one Gamma
+/// and one batched book request per 50 markets. Markets that closed or stopped taking orders are
+/// left out.
+pub async fn load_candidates(
+    gamma: &gamma::Client,
+    clob: &clob::Client,
+    condition_ids: &[String],
+) -> Result<Vec<Candidate>> {
+    let mut out = Vec::with_capacity(condition_ids.len());
+    for chunk in condition_ids.chunks(PAGE_SIZE as usize) {
+        let ids = chunk.iter().filter_map(|id| id.parse().ok()).collect();
+        let request = MarketsRequest::builder().condition_ids(ids).closed(false).limit(PAGE_SIZE).build();
+        let listed = gamma.markets(&request).await.context("loading watched markets")?;
+        let markets: Vec<Market> =
+            listed.iter().filter(|m| tradable(m).is_ok()).filter_map(|m| Market::try_from(m).ok()).collect();
+        let books = fetch_books(clob, &markets).await;
+        out.extend(markets.into_iter().zip(books).filter_map(|(market, book)| Some(Candidate { market, book: book? })));
+    }
+    Ok(out)
+}
+
 /// Fetch and store the outcomes of every decided or ordered market without one yet.
 /// Returns how many were new.
 pub async fn update_resolutions(gamma: &gamma::Client, store: &Store) -> Result<usize> {
@@ -295,6 +333,47 @@ fn parse_ref(reference: &str) -> Result<MarketRef> {
     }
 }
 
+/// An event link that names no single market, with its open markets to pick from.
+#[derive(Debug)]
+pub struct PickMarket {
+    pub event: String,
+    pub choices: Vec<MarketChoice>,
+}
+
+/// One market of an event, as a choice.
+#[derive(Debug, Clone, Serialize)]
+pub struct MarketChoice {
+    pub slug: String,
+    /// The short name Polymarket gives it inside the event, else its question.
+    pub label: String,
+    pub image: Option<String>,
+    /// The last YES price.
+    pub price: Option<f64>,
+}
+
+impl From<&gamma::types::response::Market> for MarketChoice {
+    fn from(m: &gamma::types::response::Market) -> Self {
+        let slug = m.slug.clone().unwrap_or_default();
+        let label = [&m.group_item_title, &m.question].into_iter().flatten().find(|l| !l.trim().is_empty());
+        Self {
+            label: label.cloned().unwrap_or_else(|| slug.clone()),
+            slug,
+            image: image(m),
+            price: m.outcome_prices.as_deref().and_then(|p| p.first()).and_then(|p| p.to_f64()),
+        }
+    }
+}
+
+impl fmt::Display for PickMarket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let slugs: Vec<_> = self.choices.iter().map(|c| c.slug.as_str()).take(10).collect();
+        let more = if self.choices.len() > slugs.len() { ", …" } else { "" };
+        write!(f, "event {} has {} markets, pass one of: {}{more}", self.event, self.choices.len(), slugs.join(", "))
+    }
+}
+
+impl std::error::Error for PickMarket {}
+
 /// Load one market by slug or polymarket.com URL, bypassing the liquidity filters.
 pub async fn load_candidate(gamma: &gamma::Client, clob: &clob::Client, reference: &str) -> Result<Candidate> {
     let raw = match parse_ref(reference)? {
@@ -307,13 +386,11 @@ pub async fn load_candidate(gamma: &gamma::Client, clob: &clob::Client, referenc
                 .event_by_slug(&EventBySlugRequest::builder().slug(slug.as_str()).build())
                 .await
                 .with_context(|| format!("event {slug} not found"))?;
-            match event.markets.unwrap_or_default().as_slice() {
+            let open: Vec<_> = event.markets.unwrap_or_default().into_iter().filter(|m| tradable(m).is_ok()).collect();
+            match open.as_slice() {
+                [] => bail!("event {slug} has no open markets"),
                 [only] => only.clone(),
-                many => {
-                    let slugs: Vec<_> = many.iter().filter_map(|m| m.slug.as_deref()).take(10).collect();
-                    let more = if many.len() > slugs.len() { ", …" } else { "" };
-                    bail!("event {slug} has {} markets, pass one of: {}{more}", many.len(), slugs.join(", "))
-                }
+                many => bail!(PickMarket { event: slug, choices: many.iter().map(MarketChoice::from).collect() }),
             }
         }
     };
@@ -370,6 +447,7 @@ pub fn test_candidate(yes_ask: f64, days: i64, liquidity: f64) -> Candidate {
     let market = Market {
         slug: "m".into(),
         question: "Q?".into(),
+        image: None,
         description: String::new(),
         condition_id: String::new(),
         end_date: Some(Utc::now() + Duration::days(days) + Duration::hours(1)),
@@ -386,6 +464,7 @@ pub fn test_candidate(yes_ask: f64, days: i64, liquidity: f64) -> Candidate {
         no_token_id: market.no_token,
         yes_bid: Some(yes_ask - 0.02),
         yes_ask: Some(yes_ask),
+        no_bid: Some(1.0 - yes_ask),
         no_ask: Some(1.02 - yes_ask),
         tick_size: 0.01,
         min_order_size: 5.0,

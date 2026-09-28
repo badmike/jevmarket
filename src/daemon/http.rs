@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderName, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
@@ -26,13 +26,14 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::api::{
     BriefRecord, BriefSummary, ConfigView, Event, OrderEvent, Positions, Recommendation, RecommendationDetail,
-    SecretState, StatsView, Status, Transfer, Wallets,
+    SecretState, StatsView, Status, Transfer, Wallets, WatchItem,
 };
 use super::db::Db;
 use super::engine::{Command, ManualOrder};
 use super::hub::Hub;
 use super::{Options, assets, settings};
 use crate::config::{self, ENV_OVERRIDES, Paths, Settings};
+use crate::markets::{MarketChoice, PickMarket};
 use crate::wallets::{self, Wallet};
 
 /// What the console must send in `confirm` before anything can place real orders.
@@ -87,6 +88,8 @@ pub fn router(state: AppState, base_path: &str) -> Router {
         .route("/wallets", get(wallets))
         .route("/transfer", post(transfer))
         .route("/stats", get(stats))
+        .route("/watchlist", get(watchlist).post(watch))
+        .route("/watchlist/{slug}", delete(unwatch))
         .route("/pass", post(run_pass))
         .route("/loop/pause", post(pause))
         .route("/loop/resume", post(resume))
@@ -161,6 +164,7 @@ pub fn require_confirm(live: bool, confirm: Option<&str>) -> Result<(), ApiError
                 error: format!("this places real orders: repeat the request with \"confirm\": \"{LIVE_CONFIRM}\""),
                 confirm: Some(LIVE_CONFIRM),
                 fields: BTreeMap::new(),
+                choices: Vec::new(),
             },
         });
     }
@@ -183,6 +187,9 @@ pub struct ErrorBody {
     /// Per-setting validation errors.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     fields: BTreeMap<String, String>,
+    /// The markets of an event link, to pick one from.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    choices: Vec<MarketChoice>,
 }
 
 #[derive(Debug)]
@@ -193,7 +200,8 @@ pub struct ApiError {
 
 impl ApiError {
     fn new(status: StatusCode, error: impl Into<String>) -> Self {
-        Self { status, body: ErrorBody { error: error.into(), confirm: None, fields: BTreeMap::new() } }
+        let body = ErrorBody { error: error.into(), confirm: None, fields: BTreeMap::new(), choices: Vec::new() };
+        Self { status, body }
     }
 
     fn internal(e: anyhow::Error) -> Self {
@@ -203,7 +211,11 @@ impl ApiError {
 
     /// An action the engine tried and could not complete.
     fn failed(e: anyhow::Error) -> Self {
-        Self::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}"))
+        let mut error = Self::new(StatusCode::UNPROCESSABLE_ENTITY, format!("{e:#}"));
+        if let Some(pick) = e.downcast_ref::<PickMarket>() {
+            error.body.choices.clone_from(&pick.choices);
+        }
+        error
     }
 
     fn unavailable() -> Self {
@@ -267,6 +279,11 @@ async fn orders(State(st): Shared, Query(q): Query<Limit>) -> ApiResult<Vec<Orde
 
 async fn stats(State(st): Shared) -> ApiResult<StatsView> {
     Ok(Json(st.db().stats().map_err(ApiError::internal)?))
+}
+
+/// The watched markets as the last price-watch tick saw them, closest to a trade first.
+async fn watchlist(State(st): Shared) -> Json<Vec<WatchItem>> {
+    Json(st.hub.watchlist())
 }
 
 async fn positions(State(st): Shared) -> ApiResult<Positions> {
@@ -442,6 +459,30 @@ impl MarketRef {
 async fn decide(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<Recommendation> {
     let reference = body.reference()?;
     st.ask(|reply| Command::Decide { reference, fresh: body.fresh, reply }).await.map(Json)
+}
+
+/// Put a market on the watchlist; one Jev never priced is decided first.
+async fn watch(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<Recommendation> {
+    let reference = body.reference()?;
+    st.ask(|reply| Command::Watch { reference, reply }).await.map(Json)
+}
+
+/// Take a market off the watchlist. The price watch keeps it while its view is recent.
+async fn unwatch(State(st): Shared, Path(slug): Path<String>) -> Result<StatusCode, ApiError> {
+    let recommendation = {
+        let db = st.db();
+        if !db.store.unwatch(&slug).map_err(ApiError::internal)? {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, format!("{slug} is not on the watchlist")));
+        }
+        db.recommendation(&slug).map_err(ApiError::internal)?
+    };
+    st.hub.unpin(&slug);
+    if let Some(recommendation) = recommendation {
+        st.hub.emit(Event::Decision { recommendation });
+    }
+    st.hub.emit(Event::WatchlistChanged);
+    tracing::info!(slug, "taken off the watchlist");
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn refresh_brief(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<BriefRecord> {

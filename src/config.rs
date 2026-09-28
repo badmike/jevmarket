@@ -71,7 +71,8 @@ pub struct Settings {
     pub research_model: String,
     /// Reuse a cached brief for this long.
     pub research_ttl_hours: f64,
-    /// Hard cap on researcher calls per `run` pass.
+    /// Hard cap on researcher calls per `run` pass. In the daemon, per research cycle, shared
+    /// with the price watch until the next cycle starts.
     pub max_research_per_run: u32,
     /// Web search results per brief.
     pub research_max_results: u32,
@@ -116,8 +117,21 @@ pub struct Settings {
     // --- hard caps (enforced in the executor) -------------------------------
     pub max_usd_per_trade: f64,
     pub max_open_exposure_usd: f64,
+    /// Orders per `run` pass. In the daemon, per research cycle, shared with the price watch.
     pub max_trades_per_run: u32,
     pub kelly_fraction: f64,
+
+    // --- price watch (daemon only) ------------------------------------------
+    /// Seconds between price-watch ticks between research cycles; 0 turns the watch off.
+    pub watch_interval_secs: u64,
+    /// A watch signal on a brief older than this is researched again before trading.
+    pub trade_brief_max_age_minutes: u64,
+    /// Let the price watch sell held positions early, see `min_exit_edge` and `min_exit_profit`.
+    pub sell_early: bool,
+    /// Sell only when the best bid beats Jev's probability of the held side by this much.
+    pub min_exit_edge: f64,
+    /// And only when the bid returns at least this share of what the position cost (0.2 = 20%).
+    pub min_exit_profit: f64,
 
     // --- misc ---------------------------------------------------------------
     pub dry_run: bool,
@@ -169,6 +183,11 @@ impl Default for Settings {
             max_open_exposure_usd: 50.0,
             max_trades_per_run: 3,
             kelly_fraction: 0.25,
+            watch_interval_secs: 60,
+            trade_brief_max_age_minutes: 120,
+            sell_early: true,
+            min_exit_edge: 0.05,
+            min_exit_profit: 0.20,
             dry_run: false,
             db_path: None,
             log_level: "info".into(),

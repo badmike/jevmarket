@@ -1,6 +1,7 @@
 //! `jevmarket daemon`: the trading loop as a long-running process, with a live web console.
 //!
-//! The engine thread owns the pipeline and runs the passes (see [`engine`]); the HTTP server
+//! The engine thread owns the pipeline and runs the research cycles and price-watch ticks (see
+//! [`engine`] and [`price_watch`]); the HTTP server
 //! answers snapshot queries from its own read connection, forwards commands to the engine and
 //! streams [`api::Event`]s over SSE. See `docs/daemon.md`.
 
@@ -10,6 +11,7 @@ mod db;
 mod engine;
 mod http;
 mod hub;
+mod price_watch;
 
 use std::net::SocketAddr;
 use std::sync::Mutex;
@@ -20,7 +22,7 @@ use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use self::api::{LoopState, Status};
+use self::api::{LoopState, Status, Watch};
 use self::db::Db;
 use self::engine::Engine;
 use self::hub::{Hub, LogLayer};
@@ -31,12 +33,16 @@ pub struct Args {
     /// Address to listen on. Keep it on localhost and put a TLS proxy in front for remote access.
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: SocketAddr,
-    /// Seconds between passes.
-    #[arg(long = "loop", value_name = "SECONDS", default_value_t = 900, value_parser = clap::value_parser!(u64).range(1..))]
+    /// Seconds between research cycles. The price watch checks prices in between.
+    #[arg(long = "loop", value_name = "SECONDS", default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
     every: u64,
     /// Evaluate and log, but place no orders, whatever the config says.
     #[arg(long)]
     pub dry_run: bool,
+    /// Start the loop right away when live, instead of waiting paused for a resume in the console.
+    /// Meant for services that should trade from boot.
+    #[arg(long)]
+    pub autostart: bool,
     /// Max candidate markets per pass.
     #[arg(short = 'n', long, default_value_t = 20)]
     limit: usize,
@@ -56,12 +62,14 @@ impl Args {
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub dry_run_forced: bool,
+    pub autostart: bool,
     pub loop_secs: u64,
     pub limit: usize,
 }
 
 pub async fn run(paths: Paths, args: Args) -> Result<()> {
-    let opts = Options { dry_run_forced: args.dry_run, loop_secs: args.every, limit: args.limit };
+    let opts =
+        Options { dry_run_forced: args.dry_run, autostart: args.autostart, loop_secs: args.every, limit: args.limit };
     let s = settings(&paths, opts.dry_run_forced)?;
     let db_path = s.db_path(&paths);
     let db = Db::open(&db_path)?;
@@ -78,6 +86,7 @@ pub async fn run(paths: Paths, args: Args) -> Result<()> {
         last_pass: None,
         spend_total: db.store.spend()?,
         last_error: None,
+        watch: Watch { interval_secs: s.watch_interval_secs, ..Watch::default() },
     });
     init_logging(&s, hub.clone());
 

@@ -21,7 +21,7 @@ use serde_json::json;
 
 use crate::config::Settings;
 use crate::markets::Candidate;
-use crate::signal::Trade;
+use crate::signal::{Exit, Trade};
 use crate::store::{OrderRow, Store};
 
 const POSITIONS_PAGE: i32 = 500;
@@ -130,20 +130,7 @@ impl<'a> Executor<'a> {
 
     pub async fn positions(&self) -> Result<Vec<Position>> {
         let Some(user) = self.wallet else { return Ok(Vec::new()) };
-        let mut out = Vec::new();
-        loop {
-            let request = PositionsRequest::builder()
-                .user(user)
-                .limit(POSITIONS_PAGE)?
-                .offset(i32::try_from(out.len()).unwrap_or(i32::MAX))?
-                .build();
-            let page = self.data.positions(&request).await.context("loading positions")?;
-            let done = page.len() < POSITIONS_PAGE as usize;
-            out.extend(page);
-            if done {
-                return Ok(out);
-            }
-        }
+        positions(&self.data, user).await
     }
 
     pub async fn open_orders(&self) -> Result<Vec<OpenOrderResponse>> {
@@ -212,6 +199,44 @@ impl<'a> Executor<'a> {
 
     // --- action -------------------------------------------------------------
 
+    /// Sell a holding at its limit price. Selling takes no risk on, so neither the trade count nor
+    /// the money caps apply. The order is logged as a SELL.
+    pub async fn sell(&mut self, c: &Candidate, e: &Exit) -> Result<Placed> {
+        let slug = c.market.slug.as_str();
+        let token_id = e.token_id.to_string();
+        let outcome = e.outcome.to_string();
+        let row = OrderRow {
+            slug,
+            question: &c.market.question,
+            condition_id: &c.market.condition_id,
+            token_id: &token_id,
+            outcome: &outcome,
+            sell: true,
+            price: e.price,
+            size: e.size,
+            usd: e.usd,
+            ..OrderRow::default()
+        };
+        if self.dry_run {
+            self.store.log_order(&OrderRow { status: "dry_run", dry_run: true, ..row })?;
+            tracing::info!("DRY RUN: would SELL {outcome} x{:.2} @ {:.3} (${:.2}) on {slug}", e.size, e.price, e.usd);
+            return Ok(Placed { ok: true, order_id: None, status: "dry_run".into(), message: None });
+        }
+        let Some(trader) = self.trader.as_ref() else { bail!("selling needs polymarket_private_key") };
+        let posted = post_limit(trader, Side::Sell, e.token_id, e.price, e.size).await;
+        let placed = self.logged(row, posted)?;
+        if placed.ok {
+            tracing::info!(
+                "SOLD {slug}: {outcome} x{:.2} @ {:.3} (${:.2}) status={}",
+                e.size,
+                e.price,
+                e.usd,
+                placed.status
+            );
+        }
+        Ok(placed)
+    }
+
     /// Place a trade the signal proposed, or with `manual`, one a person asked for.
     pub async fn place(&mut self, c: &Candidate, t: &Trade, manual: bool) -> Result<Placed> {
         let slug = c.market.slug.as_str();
@@ -242,23 +267,34 @@ impl<'a> Executor<'a> {
         }
 
         let trader = self.trader.as_ref().expect("live executors are authenticated");
-        match post_limit_buy(trader, t.token_id, t.price, t.size).await {
+        let posted = post_limit(trader, Side::Buy, t.token_id, t.price, t.size).await;
+        let placed = self.logged(row, posted)?;
+        if placed.ok {
+            self.record_fill(c, t);
+            tracing::info!(
+                "PLACED {slug}: BUY {outcome} x{:.2} @ {:.3} (${:.2}) id={} status={}",
+                t.size,
+                t.price,
+                t.usd,
+                placed.order_id.as_deref().unwrap_or_default(),
+                placed.status
+            );
+        }
+        Ok(placed)
+    }
+
+    /// Log what the exchange made of a posted order, accepted or rejected.
+    fn logged(&self, row: OrderRow<'_>, posted: Result<PostOrderResponse>) -> Result<Placed> {
+        let slug = row.slug;
+        match posted {
             Ok(resp) if resp.success => {
                 let status = resp.status.to_string().to_lowercase();
-                self.record_fill(c, t);
                 self.store.log_order(&OrderRow {
                     order_id: Some(&resp.order_id),
                     status: &status,
                     response: Some(&response_json(&resp)),
                     ..row
                 })?;
-                tracing::info!(
-                    "PLACED {slug}: BUY {outcome} x{:.2} @ {:.3} (${:.2}) id={} status={status}",
-                    t.size,
-                    t.price,
-                    t.usd,
-                    resp.order_id
-                );
                 Ok(Placed { ok: true, order_id: Some(resp.order_id), status, message: None })
             }
             outcome_err => {
@@ -300,6 +336,30 @@ impl<'a> Executor<'a> {
     }
 }
 
+/// The wallet orders are placed from, as [`Executor::create`] picks it, without authenticating:
+/// the deposit wallet, else the key's own address.
+pub fn wallet(s: &Settings) -> Option<Address> {
+    s.polymarket_deposit_wallet.or_else(|| signer(s).ok().map(|k| k.address()))
+}
+
+/// Every position of `user`, one page of 500 at a time.
+pub async fn positions(data: &data::Client, user: Address) -> Result<Vec<Position>> {
+    let mut out = Vec::new();
+    loop {
+        let request = PositionsRequest::builder()
+            .user(user)
+            .limit(POSITIONS_PAGE)?
+            .offset(i32::try_from(out.len()).unwrap_or(i32::MAX))?
+            .build();
+        let page = data.positions(&request).await.context("loading positions")?;
+        let done = page.len() < POSITIONS_PAGE as usize;
+        out.extend(page);
+        if done {
+            return Ok(out);
+        }
+    }
+}
+
 /// The signing key from `polymarket_private_key`.
 pub fn signer(s: &Settings) -> Result<PrivateKeySigner> {
     let key = s.polymarket_private_key.trim();
@@ -333,12 +393,12 @@ pub fn kind_label(kind: SignatureType) -> &'static str {
     }
 }
 
-async fn post_limit_buy(t: &Trader, token_id: U256, price: f64, size: f64) -> Result<PostOrderResponse> {
+async fn post_limit(t: &Trader, side: Side, token_id: U256, price: f64, size: f64) -> Result<PostOrderResponse> {
     let order = t
         .client
         .limit_order()
         .token_id(token_id)
-        .side(Side::Buy)
+        .side(side)
         .price(Decimal::try_from(price)?.round_dp(4))
         .size(Decimal::try_from(size)?.round_dp(2))
         .order_type(OrderType::GTC)

@@ -56,11 +56,92 @@ pub struct Status {
     /// decision since.
     pub spend_total: Spend,
     pub last_error: Option<String>,
+    pub watch: Watch,
 }
 
-/// A buy the signal proposed, and what became of it when an order was logged.
+/// The price watch between research cycles.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Watch {
+    /// Seconds between ticks; 0 when the watch is off.
+    pub interval_secs: u64,
+    pub last_tick_at: Option<f64>,
+    /// `None` while the watch is off, the loop paused or a research cycle running.
+    pub next_tick_at: Option<f64>,
+    /// Markets checked in the last tick.
+    pub watched: usize,
+    /// Trade signals in the last tick.
+    pub signals: usize,
+    pub last_signal: Option<WatchSignal>,
+    /// Why the last tick failed.
+    pub error: Option<String>,
+}
+
+/// A market where the watch found a trade or exit signal.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WatchSignal {
+    pub ts: f64,
+    pub slug: String,
+    pub question: String,
+    /// An exit from a held position rather than a buy.
+    pub sell: bool,
+}
+
+/// One watched market as the last tick saw it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WatchItem {
+    pub slug: String,
+    pub question: String,
+    /// Jev's stored probability of YES.
+    pub p_yes: f64,
+    /// When Jev gave it.
+    pub view_at: f64,
+    /// When the brief behind the view was written; `None` without one.
+    pub brief_at: Option<f64>,
+    /// Live midpoint.
+    pub midpoint: Option<f64>,
+    /// When the market is scheduled to resolve, `YYYY-MM-DD`.
+    pub end_date: Option<String>,
+    /// Buy sides; empty for a held position.
+    pub yes: WatchSide,
+    pub no: WatchSide,
+    /// The tick found a trade or exit signal here.
+    pub signal: bool,
+    /// A person put the market on the watchlist.
+    pub pinned: bool,
+    /// The wallet holds shares here: the watch looks for an exit instead of a buy.
+    pub position: Option<WatchPosition>,
+    pub image: Option<String>,
+}
+
+/// A held position the watch may sell early.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct WatchPosition {
+    pub outcome: &'static str,
+    pub size: f64,
+    pub avg_price: f64,
+    /// Best bid of the held outcome.
+    pub bid: Option<f64>,
+    /// The lowest bid the watch sells at; `None` when none below 1 would.
+    pub trigger: Option<f64>,
+    /// `trigger - bid`: how far the bid has to rise. Zero or below is a signal.
+    pub distance: Option<f64>,
+}
+
+/// One outcome of a watched market.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct WatchSide {
+    pub ask: Option<f64>,
+    /// The highest ask the signal buys at; `None` when no ask in the trade band could trigger.
+    pub trigger: Option<f64>,
+    /// `ask - trigger`: how far the ask has to fall. Zero or below is a signal.
+    pub distance: Option<f64>,
+}
+
+/// An order the signal proposed, and what became of it when an order was logged.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Trade {
+    /// `BUY` or `SELL`.
+    pub side: String,
     pub outcome: String,
     pub price: f64,
     pub size: f64,
@@ -97,6 +178,12 @@ pub struct Recommendation {
     pub research_cost: Option<f64>,
     /// The market resolved or its end date passed.
     pub settled: bool,
+    /// When the market is scheduled to resolve, `YYYY-MM-DD`.
+    pub end_date: Option<String>,
+    /// On the watchlist a person keeps.
+    pub pinned: bool,
+    /// The market's thumbnail URL.
+    pub image: Option<String>,
 }
 
 /// A recommendation with the state Jev saw and the brief behind it.
@@ -123,6 +210,7 @@ pub struct BriefRecord {
     pub midpoint_now: Option<f64>,
     /// The market resolved or its end date passed: the brief is history.
     pub settled: bool,
+    pub image: Option<String>,
     pub brief: Brief,
 }
 
@@ -141,6 +229,7 @@ pub struct BriefSummary {
     pub settled: bool,
     pub facts: usize,
     pub sources: usize,
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +243,9 @@ pub struct Position {
     pub value_usd: f64,
     pub pnl_usd: f64,
     pub redeemable: bool,
+    /// When the market is scheduled to resolve, `YYYY-MM-DD`.
+    pub end_date: Option<String>,
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +338,8 @@ pub struct OrderEvent {
     pub slug: String,
     /// The market question, the slug when unknown.
     pub title: String,
+    /// `BUY` or `SELL`.
+    pub side: String,
     pub outcome: String,
     pub price: f64,
     pub size: f64,
@@ -290,6 +384,8 @@ pub enum Event {
     },
     PositionsChanged,
     StatsChanged,
+    /// A price-watch tick finished: read `GET watchlist` again.
+    WatchlistChanged,
     ConfigChanged,
     Log {
         ts: f64,
@@ -357,6 +453,9 @@ mod tests {
             jev_cost: 0.0,
             research_cost: None,
             settled: false,
+            end_date: None,
+            pinned: false,
+            image: None,
         };
         let v =
             serde_json::to_value(RecommendationDetail { recommendation: r, state: json!({}), brief: None }).unwrap();
