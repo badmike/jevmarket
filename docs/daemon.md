@@ -5,17 +5,23 @@
 ```bash
 jevmarket daemon --dry-run                       # console on http://127.0.0.1:8787/
 jevmarket daemon --loop 1800 -n 20               # a research cycle every 30 minutes, 20 markets each
-jevmarket daemon --bind 127.0.0.1:8787 --base-path /jevmarket   # behind a proxy under /jevmarket/
+jevmarket daemon --port 9000                     # console on http://127.0.0.1:9000/
+jevmarket daemon --base-path /jevmarket          # behind a proxy under /jevmarket/
+jevmarket daemon --host 0.0.0.0                  # reachable from your network, see the warning below
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--bind` | `127.0.0.1:8787` | Address to listen on. Keep it on localhost and put a TLS proxy in front for remote access |
+| `--host IP` | `127.0.0.1` | IP address to listen on, `0.0.0.0` or `::` for every interface. Keep it on localhost and put a TLS proxy in front for remote access |
+| `--port` | `8787` | Port to listen on |
 | `--loop SECS` | `3600` | Seconds between research cycles. The price watch checks prices in between |
 | `--dry-run` | off | Place no orders whatever the config says. The console shows the mode as forced |
 | `--autostart` | off | When live, start the loop right away instead of waiting paused for a resume in the console. For services that should trade from boot |
 | `-n, --limit` | `20` | Candidate markets per pass, as for `run` |
 | `--base-path` | none | URL prefix when a proxy serves the console under a sub-path |
+
+> [!WARNING]
+> The console has no login. With `--host` set to anything but a loopback address, anyone who can reach the port can change the settings and trade; the daemon logs a warning at startup. Open it by IP address, since host names other than `localhost` are refused without a proxy (see [Safety without a login](#safety-without-a-login)), and restrict who can reach it with a firewall.
 
 > [!WARNING]
 > Like `run`, the daemon is **live unless `--dry-run` is given or `dry_run` is set**. A live daemon starts paused: no order goes out until you resume the loop in the console and type `LIVE` to confirm, unless it was started with `--autostart`. A dry-run daemon starts its first pass right after launch.
@@ -26,6 +32,7 @@ jevmarket daemon --bind 127.0.0.1:8787 --base-path /jevmarket   # behind a proxy
 
 ```bash
 jevmarket service install --dry-run --loop 600   # install and start; run again to change the flags
+jevmarket service install --port 9000            # listen on another port
 jevmarket service restart                        # after upgrading jevmarket
 jevmarket service status                         # running or not, and where the logs are
 jevmarket service uninstall                      # stop and remove; config and database stay
@@ -163,7 +170,7 @@ All endpoints are under `<base-path>/api/`, take and return JSON, and report err
 | `POST decide` | `{"reference": "slug or URL", "fresh"?: bool}`: research, ask Jev, log. Never trades |
 | `GET orders` | Orders the bot and the console logged, live and dry-run, with the market `title`, `manual` for console orders and the exchange's `message` for rejected ones |
 | `POST orders` | `{"reference": "slug or URL", "outcome": "YES" or "NO", "price": 0.42, "usd": 5, "confirm"?: "LIVE"}`: place a manual limit BUY. Refused and rejected orders answer `422` |
-| `GET positions` | Balance, positions, open orders (with `slug` and `title` when the local log knows the market) and exposure against the cap, read from Polymarket |
+| `GET positions` | Balance, positions (with `ordered_at`, when jevmarket first bought the outcome live, `null` for shares bought elsewhere), open orders (with `slug` and `title` when the local log knows the market) and exposure against the cap, read from Polymarket |
 | `GET wallets` | The key's deposit wallet and polymarket.com wallet with their pUSD, read on-chain, plus warnings when the config disagrees |
 | `POST transfer` | `{"from": "deposit" or "proxy", "amount_usd": 5 or null}`: move pUSD to the other wallet, `null` moves everything. No typed confirmation: both ends are derived from the key |
 | `GET stats` | Everything `stats` shows, plus reliability bins and cumulative PnL over time |

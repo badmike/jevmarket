@@ -5,6 +5,8 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 ## [Unreleased]
 
+- ✨ `daemon` and `service install` take `--host` and `--port` instead of `--bind`; a console listening beyond localhost is warned about
+- ✨ Positions show when jevmarket first bought each one, in the console and in `jevmarket positions`
 - ✨ The price watch sells held positions early when the best bid beats Jev's probability of the held side by `min_exit_edge` (0.05) and returns `min_exit_profit` (20%) on the entry, after renewing a stale view. Logged as `sell` or `hold` decisions and SELL orders; stats count sale proceeds. Off with `sell_early: false`
 - ✨ Put any market on your watchlist from the console (`POST /api/watchlist`, `DELETE /api/watchlist/{slug}`): it is watched whatever its view's age, and decided first when Jev never priced it
 - ✨ `daemon --autostart` starts a live loop right away instead of waiting paused for a resume

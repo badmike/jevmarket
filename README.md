@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/badmike/jevmarket/actions/workflows/ci.yml/badge.svg)](https://github.com/badmike/jevmarket/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](Cargo.toml)
+[![Rust 1.98+](https://img.shields.io/badge/rust-1.98%2B-orange.svg)](Cargo.toml)
 
 [How it decides](#how-a-decision-is-made) · [Install](#install) · [Configure](#configuration) · [Commands](#commands) · [Safety](#safety-model)
 
@@ -41,7 +41,7 @@ Jev has no browsing and a training cutoff. Asked about a news-driven market on i
 5. **Evaluate** (`signal.rs`, a pure function). Skip unless answerable and clear. Consider only contracts whose ask sits inside `[min_trade_price, max_trade_price]`. Pick the side with the larger edge and require `p − ask ≥ min_edge`. Size with fractional Kelly against `max_open_exposure_usd`, capped at `max_usd_per_trade`, rounded to the market's tick and minimum size.
    A trade signal on a cached brief is researched again and re-evaluated, so orders only go out on evidence from this pass (`pipeline.rs`). Edges above `suspicious_edge` are logged and skipped: after fresh research that big a gap is more often the model than the market.
    In the daemon, a **price watch** runs between research cycles. Every `watch_interval_secs` it holds the stored Jev views of recently researched markets against their live order books, with the same `evaluate`. A tick without a trade signal calls no model at all. On a signal, a brief older than `trade_brief_max_age_minutes` is researched again and a midpoint that moved by a tick goes back to Jev, then the order goes out under the same caps. The watch also sells a held position early when the bid beats Jev's probability by `min_exit_edge` and locks in `min_exit_profit`. See [docs/daemon.md](docs/daemon.md#price-watch).
-6. **Execute** (`executor.rs`). A GTC limit buy at the best ask, placed only if every cap passes. This is the only module that can spend money.
+6. **Execute** (`executor.rs`). A GTC limit buy at the best ask, placed only if every cap passes. This is the only module that places orders.
 7. **Log** (`store.rs`). Every brief, decision and order goes to SQLite. Each `run` pass first fetches the outcomes of logged markets that have resolved (one Gamma request per 50 markets), so `stats` can score Jev against real results.
 
 ## Install
@@ -52,7 +52,7 @@ With Homebrew on macOS or Linux:
 brew install badmike/tap/jevmarket
 ```
 
-From source (Rust 1.88 or newer):
+From source (Rust 1.98 or newer):
 
 ```bash
 cargo install --git https://github.com/badmike/jevmarket
@@ -204,12 +204,12 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `research <slug\|url> [--fresh]` | Researcher only: print the full evidence brief with sources |
 | `decide <slug\|url> [--show-state] [--no-research] [--fresh]` | Research, ask Jev, show the proposed trade. Never places orders, always logs the decision |
 | `run [--dry-run] [--max-trades N] [-n 20] [--loop SECS] [--no-research]` | The full pipeline. **Live by default** |
-| `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console: a research cycle every hour (`--loop 3600`) and a price watch in between. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
-| `service install [DAEMON FLAGS]\|uninstall\|restart\|status` | Run the daemon as a login service: launchd on macOS, systemd on Linux. See [Run it as a service](docs/daemon.md#run-it-as-a-service) |
+| `daemon [--dry-run] [--autostart] [--loop SECS] [-n 20] [--host IP] [--port 8787] [--base-path PATH]` | The `run` loop as a long-running process with a live web console: a research cycle every hour (`--loop 3600`) and a price watch in between. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
+| `service install [DAEMON FLAGS]\|uninstall\|restart\|status` | Run the daemon as a login service: launchd on macOS, systemd on Linux. `install` takes the daemon's flags, e.g. `--host 0.0.0.0 --port 9000`. See [Run it as a service](docs/daemon.md#run-it-as-a-service) |
 | `resolve` | Fetch outcomes of decided or ordered markets that resolved since the last check. `run` does this at the start of every pass |
 | `setup` | Create the deposit wallet, approve the exchange contracts, point `polymarket_deposit_wallet` at it and show where to fund it. Safe to run again |
 | `transfer <deposit\|proxy> <amount\|all>` | Move pUSD from that wallet to your other one (deposit wallet and polymarket.com wallet), without gas. Asks first unless `--yes` |
-| `positions` | pUSD balance, open positions, open orders, current exposure against the cap |
+| `positions` | pUSD balance, open positions with the date jevmarket first bought each, open orders, current exposure against the cap |
 | `stats` | Decision and order counts, spend, Jev P(yes) buckets, calibration on resolved markets, and PnL. See below |
 | `config path\|init\|show\|set` | See [Configuration](#configuration) |
 
@@ -258,7 +258,7 @@ Same behavior:
 - Command names, flags and defaults, including `run` being live by default.
 - The Jev questions and the clarity rubric, word for word.
 - Edge, band, Kelly and tick-rounding math. The Python test cases are ported one to one.
-- The SQLite schema, extended only by adding: a `resolutions` table and a `midpoint` column on `research`, created on first open. Point `db_path` at an existing `jevymarket.db` and `stats` keeps counting, cached briefs included.
+- The SQLite schema, extended only by adding: `resolutions` and `watchlist` tables, a `midpoint` column on `research`, `skip_code` and `image` on `decisions`, and `source` and `question` on `orders`, created on first open. Point `db_path` at an existing `jevymarket.db` and `stats` keeps counting, cached briefs included.
 
 Different, on purpose:
 
@@ -280,7 +280,7 @@ Different, on purpose:
 
 - **Longshot bias.** Jev tends to be less confident than the market at the extremes, which shows up as "edge" on 5-cent contracts. The trade band is the guard; widen it only with evidence from `stats`.
 - **Edge is not profit.** A limit order at the ask takes liquidity. Adverse selection eats into an 8-point threshold. Run `--dry-run`, watch `stats` once markets resolve, then trade small.
-- **No exits.** Positions are held to resolution.
+- **Few exits.** `run` holds positions to resolution. Only the daemon's price watch sells early, and only on the `min_exit_edge` and `min_exit_profit` rule. There is no stop-loss.
 - **Beta endpoint.** OpenRouter's Decisions API is in beta. Answers are parsed leniently (`noul`, `probability`, `p` or `value` all work), but re-run `jev-test` after a Jev version bump.
 - **Jev reads literally** and degrades with irrelevant context. Keep the state small; every new field needs a reason.
 
@@ -298,9 +298,14 @@ src/
   markets.rs     Gamma scan, filters, batched order books, Jev state
   pipeline.rs    pre-screen, brief cache -> state -> Jev -> evaluate, stale-evidence guard, logging
   executor.rs    caps, order placement, positions, approvals
-  store.rs       SQLite log, research cache, resolutions, calibration and PnL
+  deposit_wallet.rs  the deposit wallet `setup` deploys and approves
+  relayer.rs     Polymarket's gas-free relayer for wallet transactions
+  wallets.rs     the two wallets a key owns, `transfer` between them
+  store.rs       SQLite log, research cache, resolutions, watchlist, calibration and PnL
   ui.rs          tables and colored output
+  daemon/        `daemon`: engine thread, price watch, HTTP API and SSE, embedded console
   service.rs     `service`: the daemon as a launchd agent or systemd user unit
+web/             the console (Vue, Vite), built into `web/dist` and embedded in the binary
 ```
 
 Polymarket access goes through [`polymarket_client_sdk_v2`](https://crates.io/crates/polymarket_client_sdk_v2), Polymarket's own Rust SDK (Gamma, Data API, CLOB, EIP-712 order signing). On-chain approvals use [`alloy`](https://alloy.rs). OpenRouter is plain HTTPS through `reqwest`; there is no other AI provider.
