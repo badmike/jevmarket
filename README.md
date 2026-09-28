@@ -40,6 +40,7 @@ Jev has no browsing and a training cutoff. Asked about a news-driven market on i
    - `clarity` (score 0 to 4): how objective the resolution criteria are
 5. **Evaluate** (`signal.rs`, a pure function). Skip unless answerable and clear. Consider only contracts whose ask sits inside `[min_trade_price, max_trade_price]`. Pick the side with the larger edge and require `p − ask ≥ min_edge`. Size with fractional Kelly against `max_open_exposure_usd`, capped at `max_usd_per_trade`, rounded to the market's tick and minimum size.
    A trade signal on a cached brief is researched again and re-evaluated, so orders only go out on evidence from this pass (`pipeline.rs`). Edges above `suspicious_edge` are logged and skipped: after fresh research that big a gap is more often the model than the market.
+   In the daemon, a **price watch** runs between research cycles. Every `watch_interval_secs` it holds the stored Jev views of recently researched markets against their live order books, with the same `evaluate`. A tick without a trade signal calls no model at all. On a signal, a brief older than `trade_brief_max_age_minutes` is researched again and a midpoint that moved by a tick goes back to Jev, then the order goes out under the same caps. The watch also sells a held position early when the bid beats Jev's probability by `min_exit_edge` and locks in `min_exit_profit`. See [docs/daemon.md](docs/daemon.md#price-watch).
 6. **Execute** (`executor.rs`). A GTC limit buy at the best ask, placed only if every cap passes. This is the only module that can spend money.
 7. **Log** (`store.rs`). Every brief, decision and order goes to SQLite. Each `run` pass first fetches the outcomes of logged markets that have resolved (one Gamma request per 50 markets), so `stats` can score Jev against real results.
 
@@ -152,8 +153,8 @@ Secrets can stay out of the file entirely. These environment variables override 
 | **Researcher** | | |
 | `research_enabled` | `true` | `false` runs Jev alone (expect near-zero trades) |
 | `research_model` | `deepseek/deepseek-v4-pro-0813` | Any OpenRouter chat model, see below |
-| `research_ttl_hours` | `6` | Reuse a cached brief for this long |
-| `max_research_per_run` | `20` | Hard cap on researcher calls per `run` pass |
+| `research_ttl_hours` | `6` | Reuse a cached brief for this long. Also how long the daemon's price watch follows a Jev view |
+| `max_research_per_run` | `20` | Hard cap on researcher calls per `run` pass; in the daemon per research cycle, shared with the price watch |
 | `research_max_results` | `5` | Web search results per brief |
 | `research_max_chars` | `2500` | Size limit of the evidence block in the Jev state |
 | `research_exclude_domains` | 12 odds sites | Domains the web search must never return |
@@ -176,8 +177,14 @@ Secrets can stay out of the file entirely. These environment variables override 
 | **Hard caps** | | |
 | `max_usd_per_trade` | `5` | Per-order notional cap |
 | `max_open_exposure_usd` | `50` | Positions plus open buy orders may not exceed this; also the Kelly bankroll |
-| `max_trades_per_run` | `3` | Orders per `run` pass |
+| `max_trades_per_run` | `3` | Orders per `run` pass; in the daemon per research cycle, shared with the price watch |
 | `kelly_fraction` | `0.25` | Fraction of full Kelly used for sizing |
+| **Price watch** (daemon only) | | |
+| `watch_interval_secs` | `60` | Seconds between price checks between research cycles; `0` turns the watch off |
+| `trade_brief_max_age_minutes` | `120` | A watch signal on an older brief is researched again before trading |
+| `sell_early` | `true` | Let the price watch sell held positions before resolution |
+| `min_exit_edge` | `0.05` | Sell only when the best bid beats Jev's probability of the held side by this much |
+| `min_exit_profit` | `0.2` | And only when the bid returns at least this share of the average price paid |
 | **Misc** | | |
 | `dry_run` | `false` | Make every `run` a dry run |
 | `db_path` | `null` | SQLite file; `null` uses the data directory above |
@@ -197,7 +204,7 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `research <slug\|url> [--fresh]` | Researcher only: print the full evidence brief with sources |
 | `decide <slug\|url> [--show-state] [--no-research] [--fresh]` | Research, ask Jev, show the proposed trade. Never places orders, always logs the decision |
 | `run [--dry-run] [--max-trades N] [-n 20] [--loop SECS] [--no-research]` | The full pipeline. **Live by default** |
-| `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
+| `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console: a research cycle every hour (`--loop 3600`) and a price watch in between. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
 | `service install [DAEMON FLAGS]\|uninstall\|restart\|status` | Run the daemon as a login service: launchd on macOS, systemd on Linux. See [Run it as a service](docs/daemon.md#run-it-as-a-service) |
 | `resolve` | Fetch outcomes of decided or ordered markets that resolved since the last check. `run` does this at the start of every pass |
 | `setup` | Create the deposit wallet, approve the exchange contracts, point `polymarket_deposit_wallet` at it and show where to fund it. Safe to run again |
@@ -210,22 +217,22 @@ Markets can be given as a slug or a polymarket.com URL: `/event/<event>/<market>
 
 `stats` scores Jev on resolved markets, using each market's latest decision with a Jev probability so markets seen on every pass count once. It reports the Brier score of Jev's P(yes) and of the market midpoint at decision time (lower is better), and the hit rate of the side with the larger edge, split by `jev_sees_market_price` variant, by edge, by `answerable` and by clarity. PnL is reported for live orders and, separately, for the hypothetical dry-run orders, both assuming each order filled at its limit price. `positions` shows what the exchange actually filled.
 
-`run --loop 900` repeats every 15 minutes until Ctrl-C. A failed pass (an API hiccup, a network drop) is reported and the loop carries on; a rejected OpenRouter key or exhausted credits stop it, since every further call would fail the same way.
+`run --loop 900` repeats every 15 minutes until Ctrl-C. It has one cadence; the price watch between passes is daemon-only. A failed pass (an API hiccup, a network drop) is reported and the loop carries on; a rejected OpenRouter key or exhausted credits stop it, since every further call would fail the same way.
 
 ## Safety model
 
 Every order has to pass all of these, in this order:
 
 1. **Signal gates** (`signal.rs`): `answerable ≥ min_answerable`, `clarity ≥ min_clarity`, ask inside the trade band, `edge ≥ min_edge`.
-2. **Fresh evidence** (`pipeline.rs`): a signal on a cached brief is researched again and has to pass the gates a second time; `edge ≤ suspicious_edge`.
+2. **Fresh evidence** (`pipeline.rs`): a signal on a cached brief is researched again and has to pass the gates a second time; `edge ≤ suspicious_edge`. The daemon's price watch researches again when the brief is older than `trade_brief_max_age_minutes`.
 3. **Sizing**: fractional Kelly, capped at `max_usd_per_trade`. If the market's minimum order size would push the order past 1.5× that cap, the trade is refused.
 4. **Executor checks** (`executor.rs`), re-evaluated immediately before each order:
-   - no more than `max_trades_per_run` orders this pass
+   - no more than `max_trades_per_run` orders this pass (in the daemon: this research cycle, price watch included)
    - no second order on a market the database already has a live order for
    - no order on a market where the wallet already holds a position or an open order
    - positions plus open buy orders plus this order stay under `max_open_exposure_usd`
 
-Orders are GTC limit buys at the best ask. There is no selling, no stop-loss and no re-pricing: positions are held to resolution. The caps are the only brake, so set them to amounts you can lose.
+Orders are GTC limit buys at the best ask. There is no stop-loss and no re-pricing. `run` holds positions to resolution; the daemon's price watch sells one early only when the bid beats Jev's probability by `min_exit_edge` and returns `min_exit_profit` on its cost (`sell_early`). The caps are the only brake, so set them to amounts you can lose.
 
 `--dry-run` runs everything except the order itself and logs the intended order with `dry_run = 1`. Without `polymarket_private_key`, dry runs still work and read exposure from `polymarket_deposit_wallet` if you set it.
 

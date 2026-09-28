@@ -5,6 +5,19 @@ Commits follow the [Gitmoji](https://gitmoji.dev/) convention.
 
 ## [Unreleased]
 
+- ✨ The price watch sells held positions early when the best bid beats Jev's probability of the held side by `min_exit_edge` (0.05) and returns `min_exit_profit` (20%) on the entry, after renewing a stale view. Logged as `sell` or `hold` decisions and SELL orders; stats count sale proceeds. Off with `sell_early: false`
+- ✨ Put any market on your watchlist from the console (`POST /api/watchlist`, `DELETE /api/watchlist/{slug}`): it is watched whatever its view's age, and decided first when Jev never priced it
+- ✨ `daemon --autostart` starts a live loop right away instead of waiting paused for a resume
+- ✨ The price watch keeps checking prices while the loop is paused, placing no orders
+- ✨ Markets, the watchlist and positions show when a market resolves
+- ✨ Pin briefings, icon-only loop controls with tooltips, and plain-English tooltips across the console
+- 🐛 Buttons show a loading spinner or their icon, not both
+- ✨ An event link with several open markets offers them in a picker when deciding or watching a market, instead of failing
+- 💄 Market thumbnails from Polymarket on markets, the watchlist, positions and briefings (`decisions.image`)
+- ✨ Sort markets and the watchlist by any column, on a phone too; the choice is remembered
+- 💄 Briefings on a desktop scroll the list and the reader apart, and a newly opened brief starts at its top; read briefs are dimmed, without an unread dot
+
+- ✨ The daemon watches prices between research cycles: every `watch_interval_secs` (60) the stored Jev views of recently researched markets meet the live order books, and a trade signal is researched again when its brief is older than `trade_brief_max_age_minutes` (120), put back to Jev when the price moved, then ordered under the same caps. Research cycles run hourly by default (`daemon --loop 3600`); the trade and research caps are shared per cycle. New `GET /api/watchlist`, a watch card on the Overview page and a Watchlist tab on the Markets page
 - ✨ `jevmarket service install|uninstall|restart|status` runs the daemon as a login service, a launchd agent on macOS or a systemd user unit on Linux
 - ✨ Install the web console as an app on iOS and Android: web app manifest, home screen icons, full-screen standalone mode
 - 📦 Homebrew formula: `brew install badmike/tap/jevmarket`, updated by the release workflow
