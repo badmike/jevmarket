@@ -1,1 +1,0 @@
-import{b as e,bt as t,vt as n,w as r,z as i}from"./vue-DNfXAOus.js";import{r as a}from"./Icon-DMCoEjtc.js";var o=r({__name:`Skeleton`,props:{class:{type:[Boolean,null,String,Object,Array]}},setup(r){let o=r;return(r,s)=>(i(),e(`div`,{"data-slot":`skeleton`,class:t(n(a)(`animate-pulse rounded-md bg-primary/10`,o.class))},null,2))}});export{o as t};

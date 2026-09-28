@@ -1,0 +1,1 @@
+import{H as e,b as t,bt as n,vt as r,w as i,z as a}from"./vue-DNfXAOus.js";import{a as o}from"./Icon-BieC_j2k.js";var s=i({__name:`AlertDescription`,props:{class:{type:[Boolean,null,String,Object,Array]}},setup(i){let s=i;return(i,c)=>(a(),t(`div`,{class:n(r(o)(`text-sm [&_p]:leading-relaxed`,s.class))},[e(i.$slots,`default`)],2))}});export{s as t};
