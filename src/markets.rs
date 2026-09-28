@@ -108,6 +108,10 @@ fn passes_static_filters(m: &gamma::types::response::Market, s: &Settings) -> Re
     if !yes(m.enable_order_book) {
         return Err("no CLOB order book".into());
     }
+    let excluded = |label: &str| s.exclude_tags.iter().any(|t| t.eq_ignore_ascii_case(label));
+    if let Some(tag) = m.tags.iter().flatten().filter_map(|t| t.label.as_deref()).find(|l| excluded(l)) {
+        return Err(format!("tagged {tag}"));
+    }
     let market = Market::try_from(m)?;
     if market.liquidity < s.min_liquidity_usd {
         return Err(format!("liquidity ${:.0} < ${:.0}", market.liquidity, s.min_liquidity_usd));
@@ -204,6 +208,7 @@ pub async fn scan(
             .maybe_liquidity_num_min(Decimal::try_from(s.min_liquidity_usd).ok())
             .maybe_volume_num_min(Decimal::try_from(s.min_volume_usd).ok())
             .end_date_max(end_date_max)
+            .include_tag(true)
             .build();
         let listed = gamma.markets(&request).await.context("listing markets")?;
         let passing: Vec<Market> = listed
@@ -412,6 +417,19 @@ mod tests {
         assert_eq!(seen["market_implied_probability_yes"], 0.49);
         let blind = build_state(&c, &Settings { jev_sees_market_price: false, ..Settings::default() }, None);
         assert!(blind.get("market_implied_probability_yes").is_none());
+    }
+
+    #[test]
+    fn excluded_tags_are_skipped() {
+        let m: gamma::types::response::Market = serde_json::from_value(json!({
+            "id": "1", "active": true, "acceptingOrders": true, "enableOrderBook": true,
+            "tags": [{"id": "1", "label": "Crypto"}, {"id": "2", "label": "crypto prices"}]
+        }))
+        .unwrap();
+        let why = passes_static_filters(&m, &Settings::default()).unwrap_err();
+        assert_eq!(why, "tagged crypto prices");
+        let open = Settings { exclude_tags: Vec::new(), ..Settings::default() };
+        assert!(!passes_static_filters(&m, &open).unwrap_err().starts_with("tagged"));
     }
 
     #[tokio::test]

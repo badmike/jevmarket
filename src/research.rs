@@ -264,6 +264,8 @@ impl Researcher {
             "plugins": [web],
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
+            // Reasoning is billed as output; a brief is retrieval and summary, not deliberation.
+            "reasoning": {"effort": "low"},
             "usage": {"include": true},
         });
         let data = self.api.post("/v1/chat/completions", &body, POLICY).await?;
