@@ -29,7 +29,9 @@ const pnlShare = (p: Position) => (cost(p) > 0 ? p.pnl_usd / cost(p) : 0)
 const signedPercent = (v: number) => `${v > 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
 const tone = (v: number) => (v < 0 ? 'text-destructive' : v > 0 ? 'text-success' : 'text-muted')
 
-const columns: Record<string, (p: Position) => number> = {
+/** Sort keys; `null` (no end date) sorts last in both directions. */
+const columns: Record<string, (p: Position) => number | null> = {
+  resolves: (p) => (p.end_date ? Date.parse(p.end_date) : null),
   size: (p) => p.size,
   value: (p) => p.value_usd,
   pnl: (p) => p.pnl_usd,
@@ -38,9 +40,12 @@ const columns: Record<string, (p: Position) => number> = {
 const rows = computed(() => {
   const key = columns[sort.value.column] ?? columns.value!
   const dir = sort.value.direction === 'asc' ? 1 : -1
-  return (props.positions ?? []).toSorted(
-    (a, b) => Number(b.redeemable) - Number(a.redeemable) || (key(a) - key(b)) * dir
-  )
+  const byKey = (a: Position, b: Position) => {
+    const [x, y] = [key(a), key(b)]
+    if (x === null || y === null) return Number(x === null) - Number(y === null)
+    return (x - y) * dir
+  }
+  return (props.positions ?? []).toSorted((a, b) => Number(b.redeemable) - Number(a.redeemable) || byKey(a, b))
 })
 </script>
 
@@ -67,6 +72,17 @@ const rows = computed(() => {
       <TableRow>
         <TableHead class="w-full min-w-64">Market</TableHead>
         <TableHead>Outcome</TableHead>
+        <TableSortableHead
+          v-model="sort"
+          column="resolves"
+        >
+          <SimpleTooltip
+            tooltip="When the market is scheduled to settle. Money in the position is tied up until then."
+            as-child
+          >
+            <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Resolves</span>
+          </SimpleTooltip>
+        </TableSortableHead>
         <TableSortableHead
           v-model="sort"
           column="size"
@@ -116,7 +132,7 @@ const rows = computed(() => {
     <TableBody>
       <TableLoadingRow
         v-if="!positions"
-        :colspan="6"
+        :colspan="7"
         :rows="3"
       />
       <TableRow
@@ -137,12 +153,6 @@ const rows = computed(() => {
               >
                 {{ p.title || p.slug }}
               </RouterLink>
-              <span
-                v-if="p.end_date && !p.redeemable"
-                class="text-xs text-muted"
-              >
-                Resolves {{ day(p.end_date) }}, {{ inDays(p.end_date) }}
-              </span>
               <SimpleTooltip
                 v-if="p.redeemable"
                 tooltip="The market has ended. Winning shares can now be cashed in at $1 each."
@@ -165,6 +175,21 @@ const rows = computed(() => {
           >
             {{ p.outcome }}
           </Badge>
+        </TableCell>
+        <TableCell
+          label="Resolves"
+          labelled
+          class="whitespace-nowrap"
+        >
+          <template v-if="p.end_date">
+            <span class="text-primary tabular-nums">{{ day(p.end_date) }}</span>
+            <span class="block text-xs text-muted">{{ inDays(p.end_date) }}</span>
+          </template>
+          <span
+            v-else
+            class="text-muted"
+            >–</span
+          >
         </TableCell>
         <TableCell
           label="Shares"
