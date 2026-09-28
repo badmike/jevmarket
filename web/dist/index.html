@@ -30,6 +30,23 @@
       href="./favicon.svg"
       type="image/svg+xml"
     />
+    <!-- Installable app: relative to <base>, so it works under any --base-path. -->
+    <link
+      rel="manifest"
+      href="./manifest.webmanifest"
+    />
+    <link
+      rel="apple-touch-icon"
+      href="./apple-touch-icon.png"
+    />
+    <meta
+      name="apple-mobile-web-app-title"
+      content="jevmarket"
+    />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
     <title>jevmarket</title>
     <!-- Applies the stored colour mode before first paint; the key is shared with
          src/composables/useColorMode.ts. -->

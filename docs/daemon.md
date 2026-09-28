@@ -19,6 +19,15 @@ jevmarket daemon --bind 127.0.0.1:8787 --base-path /jevmarket   # behind a proxy
 > [!WARNING]
 > Like `run`, the daemon is **live unless `--dry-run` is given or `dry_run` is set**. A live daemon starts paused: no order goes out until you resume the loop in the console and type `LIVE` to confirm. A dry-run daemon starts its first pass right after launch.
 
+## Install the console on a phone
+
+The console is an installable web app: add it to the home screen and it opens full screen with its own icon, like a native app.
+
+- **iOS and iPadOS**: open the console in Safari, Share, Add to Home Screen.
+- **Android**: open it in Chrome, menu, Install app (or Add to home screen).
+
+Browsers only install web apps served over HTTPS, so put the daemon behind a TLS proxy as described in [Behind nginx with TLS](#behind-nginx-with-tls), and install from that address. The app needs the daemon to be reachable: it shows live data and does nothing offline.
+
 ## What it does
 
 - **Passes** run every `--loop` seconds, exactly as `run --loop` does: resolutions are refreshed, markets scanned and ranked, decided `concurrency` at a time, and orders placed one at a time under the hard caps. Settings are read from the config file at the start of every pass, so changes made in the console apply to the next one.
