@@ -29,14 +29,14 @@ jevmarket daemon --bind 127.0.0.1:8787 --base-path /jevmarket   # behind a proxy
 - **Order** on a market's sheet places a manual limit BUY on the current book, whatever the signal said: pick the outcome, limit price and amount. It overrides the one-order-per-market rule and the per-pass trade count, never `max_usd_per_trade` or `max_open_exposure_usd`, and follows the effective dry-run setting. Manual orders are logged in `orders` with `source = 'manual'` (the bot writes `bot`) and marked in the order log and activity feed.
 - Cancelling open orders is not offered: the executor cannot cancel orders.
 
-Without an OpenRouter key the console, positions (for a configured `polymarket_wallet`) and all stored data still work; passes and decisions fail with the missing-key message until one is set.
+Without an OpenRouter key the console, positions (for a configured `polymarket_deposit_wallet`) and all stored data still work; passes and decisions fail with the missing-key message until one is set.
 
 ## Safety without a login
 
 The console has no login. These rules stand in for one:
 
 - **Secrets never leave the process.** The API reports only whether `openrouter_api_key` and `polymarket_private_key` are set. They can be replaced or cleared from the console, never read.
-- **Real money needs a typed confirmation.** Switching `dry_run` off, starting a pass, resuming the loop or placing a manual order while dry runs are off is refused with `428` unless the request carries `"confirm": "LIVE"`. The console asks you to type it.
+- **Real money needs a typed confirmation.** Switching `dry_run` off, resuming the loop or placing a manual order while dry runs are off is refused with `428` unless the request carries `"confirm": "LIVE"`. The console asks you to type it.
 - **Writes must come from the console's own origin.** Requests that change anything are refused when `Origin` differs from the host the request was sent to, or when the browser marks them `Sec-Fetch-Site: cross-site`. They must also be JSON, which a page on another site cannot send without a CORS preflight the daemon never answers.
 - **Unknown host names are refused.** Without a proxy, the daemon only answers to `localhost` and IP addresses, which stops DNS rebinding attacks from a web page. Behind a proxy, the proxy must set `X-Forwarded-Host`.
 - **Config changes go through the same validation as `config set`**, with errors reported per setting.
@@ -90,7 +90,7 @@ All endpoints are under `<base-path>/api/`, take and return JSON, and report err
 
 | Method and path | What it does |
 |---|---|
-| `GET status` | Loop state, next pass time, current and last pass with spend, dry-run mode, last error |
+| `GET status` | Loop state, next pass time, current and last pass with spend, all-time spend (from the database, so it survives restarts), dry-run mode, last error |
 | `GET events` | Server-sent events, see below |
 | `GET activity` | The last 200 events of the kinds the activity feed shows |
 | `GET config` | Effective settings without secrets, their defaults, which keys the environment overrides |
@@ -104,8 +104,10 @@ All endpoints are under `<base-path>/api/`, take and return JSON, and report err
 | `GET orders` | Orders the bot and the console logged, live and dry-run, with `manual` set for console orders |
 | `POST orders` | `{"reference": "slug or URL", "outcome": "YES" or "NO", "price": 0.42, "usd": 5, "confirm"?: "LIVE"}`: place a manual limit BUY. Refused and rejected orders answer `422` |
 | `GET positions` | Balance, positions, open orders and exposure against the cap, read from Polymarket |
+| `GET wallets` | The key's deposit wallet and polymarket.com wallet with their pUSD, read on-chain, plus warnings when the config disagrees |
+| `POST transfer` | `{"from": "deposit" or "proxy", "amount_usd": 5 or null}`: move pUSD to the other wallet, `null` moves everything. No typed confirmation: both ends are derived from the key |
 | `GET stats` | Everything `stats` shows, plus reliability bins and cumulative PnL over time |
-| `POST pass` | `{"confirm"?: "LIVE"}`: start a pass now |
+| `POST pass` | `{}`: start a pass now. No confirmation: it brings the next scheduled pass forward |
 | `POST loop/pause`, `POST loop/resume` | `{}` and `{"confirm"?: "LIVE"}` |
 
 ### Events

@@ -63,7 +63,7 @@ Tagged releases attach prebuilt binaries for Linux, macOS (Intel and Apple Silic
 You need two things before it can trade:
 
 - **An OpenRouter key.** One key covers Jev and the researcher. Jev has no free tier, so the account needs prepaid credits.
-- **A funded Polymarket wallet.** See [Funding](#funding). Raw EOAs run `jevmarket setup` once for the on-chain approvals.
+- **A funded Polymarket deposit wallet.** `jevmarket setup` creates it. See [Funding](#funding).
 
 ## Quick start
 
@@ -86,7 +86,7 @@ Then:
 jevmarket scan -n 15                      # what the bot would look at right now
 jevmarket decide <slug|url>               # research + Jev + proposed trade, never trades
 jevmarket run --dry-run                   # the full pipeline, orders only logged
-jevmarket setup                           # raw EOA only: exchange approvals
+jevmarket setup                           # create, approve and fund the deposit wallet
 jevmarket config set dry_run false        # when `stats` convinces you
 jevmarket run --max-trades 1              # LIVE: at most one real order
 ```
@@ -109,7 +109,7 @@ Settings live in one JSON file in the standard location for command-line tools:
 jevmarket config path                     # where the files are
 jevmarket config init                     # write a file with every default, to edit by hand
 jevmarket config set min_edge 0.1         # values are parsed as JSON, else taken as text
-jevmarket config set polymarket_wallet null    # null removes a key: back to its default
+jevmarket config set polymarket_proxy_wallet null    # null removes a key: back to its default
 jevmarket config show                     # effective settings, secrets masked
 ```
 
@@ -121,7 +121,8 @@ Secrets can stay out of the file entirely. These environment variables override 
 |---|---|
 | `OPENROUTER_API_KEY` | `openrouter_api_key` |
 | `POLYMARKET_PRIVATE_KEY` | `polymarket_private_key` |
-| `POLYMARKET_WALLET` | `polymarket_wallet` |
+| `POLYMARKET_DEPOSIT_WALLET` (or the older `POLYMARKET_WALLET`) | `polymarket_deposit_wallet` |
+| `POLYMARKET_PROXY_WALLET` | `polymarket_proxy_wallet` |
 
 ### All settings
 
@@ -130,11 +131,15 @@ Secrets can stay out of the file entirely. These environment variables override 
 | **Keys** | | |
 | `openrouter_api_key` | `""` | OpenRouter key for Jev and the researcher |
 | `polymarket_private_key` | `""` | 32-byte hex key of the signer. Without it, only dry runs work |
-| `polymarket_wallet` | `null` | Your Polymarket wallet if you funded via polymarket.com; `null` for a raw EOA |
+| `polymarket_deposit_wallet` | `null` | The deposit wallet orders are placed from; `setup` sets it. Files with the older `polymarket_wallet` are migrated |
+| `polymarket_proxy_wallet` | `null` | Your polymarket.com (proxy) wallet, the other end of `transfer`; `null` uses the one derived from the key |
+| `polymarket_builder_api_key` | `""` | Builder API credentials from polymarket.com (Settings, Builder). Only `setup` needs them |
+| `polymarket_builder_secret` | `""` | |
+| `polymarket_builder_passphrase` | `""` | |
 | **Endpoints** | | |
 | `openrouter_base_url` | `https://openrouter.ai/api` | |
 | `clob_host` | `https://clob.polymarket.com` | Polymarket order book API |
-| `polygon_rpc_url` | `https://polygon-rpc.com` | Only used by `setup` |
+| `polygon_rpc_url` | `https://polygon-bor-rpc.publicnode.com` | Only used by `setup` |
 | **Jev** | | |
 | `jev_model` | `typesafe/jev-1.13` | Pin a Jev version; `typesafe/jev-latest` also works |
 | `jev_sees_market_price` | `true` | Put the market midpoint into the Jev state. `stats` compares Brier scores with and without it |
@@ -161,6 +166,7 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `max_spread` | `0.06` | Checked against Gamma and again against the live book |
 | `min_market_price` / `max_market_price` | `0.03` / `0.97` | Skip markets already priced at the extremes |
 | `description_max_chars` | `1500` | Description length in the Jev state |
+| `exclude_tags` | 4 tags | Skip markets with these Polymarket tags: `Crypto Prices`, `Hit Price`, `Tweet Markets`, `Games`. Settled by a live price, a post count or a single game, they took most research spend without ever becoming answerable |
 | **Hard caps** | | |
 | `max_usd_per_trade` | `5` | Per-order notional cap |
 | `max_open_exposure_usd` | `50` | Positions plus open buy orders may not exceed this; also the Kelly bankroll |
@@ -173,7 +179,7 @@ Secrets can stay out of the file entirely. These environment variables override 
 
 **Researcher models.** Any OpenRouter chat model works. Models without native search get OpenRouter's Exa search ($0.007 per search), which honors the odds-site exclusion list. The original project tested `deepseek/deepseek-v4-pro-0813` (default), `z-ai/glm-5.3`, `qwen/qwen3.8-max-0902` and `moonshotai/kimi-k3`, plus `anthropic/claude-sonnet-5` for native search at about twice the cost.
 
-**Costs** (September 2026 prices). Jev: about $0.00006 per decision with evidence. A brief: $0.010 to $0.020. A 20-market pass: $0.20 to $0.40 before caching, a fraction of that when briefs are still fresh. `run` prints the spend after every pass.
+**Costs** (September 2026 prices). Jev: about $0.00006 per decision with evidence. A brief: about $0.008 with `z-ai/glm-5.3-flash`, of which $0.007 is Exa's flat web search fee; the model's tokens are under $0.001 at low reasoning effort. A 20-market pass: $0.20 to $0.40 before caching, a fraction of that when briefs are still fresh. `run` prints the spend after every pass.
 
 ## Commands
 
@@ -187,7 +193,8 @@ Secrets can stay out of the file entirely. These environment variables override 
 | `run [--dry-run] [--max-trades N] [-n 20] [--loop SECS] [--no-research]` | The full pipeline. **Live by default** |
 | `daemon [--dry-run] [--loop SECS] [--bind ADDR] [--base-path PATH]` | The `run` loop as a long-running process with a live web console. Live by default, but a live daemon starts paused until you resume it in the console. See [docs/daemon.md](docs/daemon.md) |
 | `resolve` | Fetch outcomes of decided or ordered markets that resolved since the last check. `run` does this at the start of every pass |
-| `setup` | One-time pUSD and outcome-token approvals for the exchange contracts (raw EOA only) |
+| `setup` | Create the deposit wallet, approve the exchange contracts, point `polymarket_deposit_wallet` at it and show where to fund it. Safe to run again |
+| `transfer <deposit\|proxy> <amount\|all>` | Move pUSD from that wallet to your other one (deposit wallet and polymarket.com wallet), without gas. Asks first unless `--yes` |
 | `positions` | pUSD balance, open positions, open orders, current exposure against the cap |
 | `stats` | Decision and order counts, spend, Jev P(yes) buckets, calibration on resolved markets, and PnL. See below |
 | `config path\|init\|show\|set` | See [Configuration](#configuration) |
@@ -213,14 +220,20 @@ Every order has to pass all of these, in this order:
 
 Orders are GTC limit buys at the best ask. There is no selling, no stop-loss and no re-pricing: positions are held to resolution. The caps are the only brake, so set them to amounts you can lose.
 
-`--dry-run` runs everything except the order itself and logs the intended order with `dry_run = 1`. Without `polymarket_private_key`, dry runs still work and read exposure from `polymarket_wallet` if you set it.
+`--dry-run` runs everything except the order itself and logs the intended order with `dry_run = 1`. Without `polymarket_private_key`, dry runs still work and read exposure from `polymarket_deposit_wallet` if you set it.
 
 ## Funding
 
 Since the April 2026 exchange upgrade Polymarket settles in **pUSD** (`0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB` on Polygon), a 1:1 USDC-backed token. Not USDC.e, not native USDC.
 
-1. **Via polymarket.com (easiest).** Deposit on the site; it arrives as pUSD in your Polymarket wallet. Set `polymarket_private_key` to the key of the wallet you log in with and `polymarket_wallet` to your Polymarket wallet address. jevmarket works out the wallet type by itself: it compares the address against the Safe and proxy wallets Polymarket derives from your key, and treats anything else as a deposit wallet. No `setup` needed, Polymarket manages the approvals.
-2. **Raw EOA.** Leave `polymarket_wallet` empty. Hold USDC.e (`0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`), approve the CollateralOnramp (`0x93070a847efEf7F70739046A929D47a521F5B8ee`) and call `wrap(USDC_E, you, amount)`. Keep a little POL for gas, then run `jevmarket setup` once.
+Polymarket only takes API orders from a **deposit wallet**: a smart wallet at an address derived from your key, which checks order signatures through ERC-1271. Orders from a raw EOA or from a polymarket.com proxy or Safe wallet are refused with "maker address not allowed, please use the deposit wallet flow".
+
+1. Set `polymarket_private_key` to the key of the account you log in with (email and social logins export it in Polymarket's settings).
+2. Create builder API credentials at [polymarket.com/settings?tab=builder](https://polymarket.com/settings?tab=builder) and set `polymarket_builder_api_key`, `polymarket_builder_secret` and `polymarket_builder_passphrase`, or export `POLYMARKET_BUILDER_API_KEY`, `POLYMARKET_BUILDER_SECRET` and `POLYMARKET_BUILDER_PASSPHRASE`.
+3. Run `jevmarket setup`. Through Polymarket's gas-free relayer it deploys the wallet and approves the exchange contracts, skipping what is already done, then sets `polymarket_deposit_wallet`.
+4. Fund it: `jevmarket transfer proxy <amount>` (or the console's Positions page) moves pUSD from your polymarket.com wallet in seconds, without gas. From elsewhere, `setup` prints a bridge address that credits the deposit wallet in pUSD for USDC sent on Polygon. `jevmarket transfer deposit <amount>` moves money back.
+
+Transfers only ever go between the two wallets derived from your key, whatever the config says, so an edited setting cannot send money elsewhere.
 
 `jevmarket positions` shows the pUSD balance the exchange sees.
 
@@ -242,8 +255,7 @@ Different, on purpose:
 - **`jev-test` makes one call** instead of two (the original called Jev again to parse what it had already printed), and uses today's date.
 - **A rejected order no longer ends the run.** An exchange error on one order is logged as `rejected` and the pass continues.
 - **`--loop` survives a failed pass** and stops cleanly on Ctrl-C.
-- **Wallet type detection** from the address, as described in [Funding](#funding).
-- **`setup` skips approvals already granted** and refreshes the exchange's balance cache afterwards.
+- **Deposit wallets**, which Polymarket now requires for API orders: `setup` deploys and approves one through the relayer, as described in [Funding](#funding).
 - **polymarket.com URLs** for single-market events resolve to the market, and multi-market events list their market slugs.
 - **Research spent where it can pay.** A clarity pre-screen before each paid brief, and candidates ranked by opportunity instead of 24h volume.
 - **Richer briefs.** The researcher also reports scheduled events and the current state of the resolution source, and returns key facts newest first. Trimming for size is balanced between for and against YES; the original dropped every point against YES before any point for it.
@@ -292,7 +304,8 @@ Pure logic (edge, sizing, gates) belongs in `signal.rs` with a test. Anything th
 
 - **`error sending request for url (https://clob-v2.polymarket.com/...)`**: that migration-era host no longer resolves. Run `jevmarket config set clob_host https://clob.polymarket.com` (the default) or remove the key.
 - **"a 0x…40-hex value is an address, not a key"**: you pasted an address into `polymarket_private_key`. A key is 32 bytes, 64 hex characters.
-- **`setup` fails with RPC errors**: the public Polygon RPC is flaky. `setup` retries six times and skips approvals already granted. A private RPC in `polygon_rpc_url` helps.
+- **"maker address not allowed, please use the deposit wallet flow"**: the order came from a wallet Polymarket no longer accepts for API trading. Run `jevmarket setup`, see [Funding](#funding).
+- **`setup` fails with RPC or relayer errors**: run it again, it skips what is already done. A private RPC in `polygon_rpc_url` helps.
 - **`no OpenRouter key`**: run `jevmarket init`, or `jevmarket config set openrouter_api_key ...`, or export `OPENROUTER_API_KEY`.
 - **More detail**: `RUST_LOG=jevmarket=debug jevmarket scan` shows why each market was skipped.
 
