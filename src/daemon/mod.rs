@@ -13,7 +13,7 @@ mod http;
 mod hub;
 mod price_watch;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,9 +30,13 @@ use crate::config::{Paths, Settings};
 
 #[derive(clap::Args)]
 pub struct Args {
-    /// Address to listen on. Keep it on localhost and put a TLS proxy in front for remote access.
-    #[arg(long, default_value = "127.0.0.1:8787")]
-    bind: SocketAddr,
+    /// IP address to listen on, `0.0.0.0` or `::` for every interface. The console has no login:
+    /// keep it on localhost and put a TLS proxy in front for remote access.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: IpAddr,
+    /// Port to listen on.
+    #[arg(long, default_value_t = 8787)]
+    port: u16,
     /// Seconds between research cycles. The price watch checks prices in between.
     #[arg(long = "loop", value_name = "SECONDS", default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
     every: u64,
@@ -54,7 +58,16 @@ pub struct Args {
 impl Args {
     /// Where the console answers, as the startup log line prints it.
     pub fn console_url(&self) -> String {
-        format!("http://{}{}/", self.bind, self.base_path)
+        format!("http://{}{}/", self.addr(), self.base_path)
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
+    }
+
+    /// Listening beyond this machine, where anyone who reaches the port controls the bot.
+    pub fn exposed(&self) -> bool {
+        !self.host.is_loopback()
     }
 }
 
@@ -109,8 +122,12 @@ pub async fn run(paths: Paths, args: Args) -> Result<()> {
         shutdown: shutdown_rx,
         index_html: assets::index_html(&args.base_path),
     };
-    let listener = tokio::net::TcpListener::bind(args.bind).await.with_context(|| format!("binding {}", args.bind))?;
+    let addr = args.addr();
+    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("binding {addr}"))?;
     tracing::info!("console on http://{}{}/", listener.local_addr()?, args.base_path);
+    if args.exposed() {
+        tracing::warn!("the console has no login and listens on {addr}: anyone who reaches it can trade");
+    }
     axum::serve(listener, http::router(state, &args.base_path))
         .with_graceful_shutdown(async move {
             signal().await;

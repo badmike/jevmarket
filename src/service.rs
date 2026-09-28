@@ -21,7 +21,7 @@ const PASSED_ENV: [&str; 2] = ["XDG_CONFIG_HOME", "XDG_DATA_HOME"];
 pub enum Action {
     /// Install the daemon as a service and start it. Run again to change its flags.
     Install {
-        /// Flags for `jevmarket daemon`, e.g. `--dry-run --loop 600`.
+        /// Flags for `jevmarket daemon`, e.g. `--dry-run --loop 600 --port 9000`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "DAEMON FLAGS")]
         flags: Vec<String>,
     },
@@ -66,6 +66,13 @@ fn install(paths: &Paths, manager: Manager, flags: Vec<String>) -> Result<()> {
 
     manager.install(&argv, &env)?;
     println!("jevmarket runs as a service, console on {}", daemon.console_url());
+    if daemon.exposed() {
+        println!(
+            "The console has no login and listens beyond this machine: anyone who reaches {} can trade. \
+             Keep it behind a firewall or a proxy with authentication.",
+            daemon.addr()
+        );
+    }
     for (var, key) in ENV_OVERRIDES {
         if env::var(var).is_ok_and(|v| !v.trim().is_empty()) {
             println!("{var} is set in this shell, but the service does not see it: `jevmarket config set {key} ...`");
@@ -302,6 +309,11 @@ mod tests {
         let daemon = DaemonFlags::try_parse_from(flags).unwrap().args;
         assert!(daemon.dry_run);
         assert_eq!(daemon.console_url(), "http://127.0.0.1:8787/jev/");
+        assert!(!daemon.exposed());
+
+        let daemon = DaemonFlags::try_parse_from(["--host", "::", "--port", "9000"]).unwrap().args;
+        assert_eq!(daemon.console_url(), "http://[::]:9000/");
+        assert!(daemon.exposed());
         assert!(DaemonFlags::try_parse_from(["--nope"]).is_err());
     }
 
