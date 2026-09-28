@@ -23,11 +23,15 @@ pub struct Db {
     conn: Connection,
 }
 
-/// Columns of [`recommendation`], after `FROM decisions d`.
+/// Columns of [`recommendation`], after `FROM decisions d`. A market is settled once it resolved
+/// or the end date in the decision's state has passed.
 const RECOMMENDATION: &str = "
     SELECT d.slug, d.question, d.condition_id, d.ts, d.p_yes, d.answerable, d.clarity, d.yes_ask, d.no_ask,
            d.midpoint, d.action, d.reason, d.jev_cost, d.research_cost,
-           o.outcome, o.price, o.size, o.usd, o.status, o.dry_run, d.state_json
+           o.outcome, o.price, o.size, o.usd, o.status, o.dry_run, d.state_json,
+           EXISTS(SELECT 1 FROM resolutions WHERE condition_id = d.condition_id)
+           OR COALESCE(date(json_extract(d.state_json, '$.today'),
+                            json_extract(d.state_json, '$.days_until_resolution') || ' days') < date('now'), 0)
     FROM decisions d
     -- The order a pass placed right before logging this decision.
     LEFT JOIN orders o ON o.id = (
@@ -35,11 +39,16 @@ const RECOMMENDATION: &str = "
             AND source IS NOT 'manual'
         ORDER BY ts DESC LIMIT 1)";
 
-/// Columns of [`brief_record`], after `FROM research r`.
+/// Columns of [`brief_record`], after `FROM research r`. A brief is settled once its market
+/// resolved or, going by the latest decision's state, its end date has passed.
 const BRIEF: &str = "
     SELECT r.id, r.ts, r.slug, r.brief_json, r.cost, r.midpoint,
            (SELECT question FROM decisions WHERE slug = r.slug ORDER BY id DESC LIMIT 1),
-           (SELECT midpoint FROM decisions WHERE slug = r.slug ORDER BY id DESC LIMIT 1)
+           (SELECT midpoint FROM decisions WHERE slug = r.slug ORDER BY id DESC LIMIT 1),
+           EXISTS(SELECT 1 FROM resolutions WHERE slug = r.slug)
+           OR COALESCE((SELECT date(json_extract(state_json, '$.today'),
+                                    json_extract(state_json, '$.days_until_resolution') || ' days') < date('now')
+                        FROM decisions WHERE slug = r.slug ORDER BY id DESC LIMIT 1), 0)
     FROM research r";
 
 impl Db {
@@ -104,7 +113,8 @@ impl Db {
     /// Orders the bot and the console logged, live and dry-run, newest first.
     pub fn orders(&self, limit: u32) -> Result<Vec<OrderEvent>> {
         let mut stmt = self.conn.prepare(
-            "SELECT ts, slug, outcome, price, size, usd, status, dry_run, order_id, source = 'manual'
+            "SELECT ts, slug, outcome, price, size, usd, status, dry_run, order_id, source = 'manual',
+                    json_extract(response_json, '$.error_msg')
              FROM orders ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
@@ -118,7 +128,7 @@ impl Db {
                 status: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
                 dry_run: r.get::<_, Option<bool>>(7)?.unwrap_or_default(),
                 order_id: r.get(8)?,
-                message: None,
+                message: r.get::<_, Option<String>>(10)?.filter(|m| !m.is_empty()),
                 manual: r.get::<_, Option<bool>>(9)?.unwrap_or_default(),
             })
         })?;
@@ -216,6 +226,7 @@ fn recommendation(r: &Row<'_>) -> rusqlite::Result<Recommendation> {
         trade,
         jev_cost: r.get::<_, Option<f64>>(12)?.unwrap_or_default(),
         research_cost: r.get(13)?,
+        settled: r.get(21)?,
     })
 }
 
@@ -241,6 +252,7 @@ fn brief_record(r: &Row<'_>, ttl_s: f64) -> rusqlite::Result<BriefRecord> {
         fresh: now() - ts < ttl_s,
         midpoint_then: r.get(5)?,
         midpoint_now: r.get(7)?,
+        settled: r.get(8)?,
         brief,
     })
 }
@@ -256,6 +268,7 @@ pub fn summary(b: &BriefRecord) -> BriefSummary {
         model: b.brief.model.clone(),
         cost: b.cost,
         fresh: b.fresh,
+        settled: b.settled,
         facts: b.brief.key_facts.len(),
         sources: b.brief.sources.len(),
     }
@@ -313,6 +326,20 @@ mod tests {
             .unwrap();
         assert!(db.orders(10).unwrap()[0].manual);
         assert!(db.recommendation("m").unwrap().unwrap().trade.is_none(), "the skip did not place it");
+    }
+
+    #[test]
+    fn briefs_of_resolved_markets_are_settled() {
+        use crate::store::Resolution;
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("t.db")).unwrap();
+        for slug in ["open", "done"] {
+            db.store.put_brief(slug, &Brief::default(), None).unwrap();
+        }
+        let r = Resolution { condition_id: "c".into(), slug: "done".into(), yes_price: 1.0, resolved_at: None };
+        db.store.put_resolution(&r).unwrap();
+        let settled = |slug| db.latest_brief(slug, 3600.0).unwrap().unwrap().settled;
+        assert!(!settled("open") && settled("done"));
     }
 
     #[test]

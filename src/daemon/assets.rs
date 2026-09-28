@@ -22,6 +22,15 @@ fn get(path: &str) -> Option<&'static [u8]> {
     ASSETS.binary_search_by_key(&path, |(name, _)| name).ok().map(|i| ASSETS[i].1)
 }
 
+/// A short fingerprint of the embedded console: every asset, so a change to any page counts
+/// (lazy page chunks can change while `index.html` stays the same).
+pub fn build_id() -> String {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::hash::DefaultHasher::new();
+    ASSETS.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// `index.html` with its `<base>` pointing at `base_path`, or `None` if the console was not built.
 pub fn index_html(base_path: &str) -> Option<String> {
     let html = String::from_utf8_lossy(get("index.html")?);

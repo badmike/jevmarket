@@ -6,7 +6,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::research::Brief;
+pub use crate::store::Spend;
 use crate::store::Stats;
+pub use crate::wallets::{Transfer, Wallets};
 
 /// What the trading loop is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -18,24 +20,6 @@ pub enum LoopState {
     /// A pass is finishing its current market after pause or shutdown.
     Stopping,
     Paused,
-}
-
-/// Money spent on OpenRouter.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
-pub struct Spend {
-    pub jev_calls: u32,
-    pub jev_usd: f64,
-    pub briefs: u32,
-    pub research_usd: f64,
-}
-
-impl std::ops::AddAssign for Spend {
-    fn add_assign(&mut self, o: Self) {
-        self.jev_calls += o.jev_calls;
-        self.jev_usd += o.jev_usd;
-        self.briefs += o.briefs;
-        self.research_usd += o.research_usd;
-    }
 }
 
 /// One trading pass, in progress or finished.
@@ -56,6 +40,9 @@ pub struct Pass {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Status {
     pub version: &'static str,
+    /// Identifies the embedded console. A console that reconnects to a different build reloads,
+    /// since its code and asset names no longer match the server's.
+    pub build: String,
     pub started_at: f64,
     pub state: LoopState,
     pub loop_secs: u64,
@@ -65,7 +52,8 @@ pub struct Status {
     pub dry_run_forced: bool,
     pub pass: Option<Pass>,
     pub last_pass: Option<Pass>,
-    /// Since the daemon started, passes and single decisions alike.
+    /// All time: what the database logged before the daemon started, plus every pass and single
+    /// decision since.
     pub spend_total: Spend,
     pub last_error: Option<String>,
 }
@@ -105,6 +93,8 @@ pub struct Recommendation {
     pub trade: Option<Trade>,
     pub jev_cost: f64,
     pub research_cost: Option<f64>,
+    /// The market resolved or its end date passed.
+    pub settled: bool,
 }
 
 /// A recommendation with the state Jev saw and the brief behind it.
@@ -129,6 +119,8 @@ pub struct BriefRecord {
     /// Market midpoint when the brief was written, and at the latest decision.
     pub midpoint_then: Option<f64>,
     pub midpoint_now: Option<f64>,
+    /// The market resolved or its end date passed: the brief is history.
+    pub settled: bool,
     pub brief: Brief,
 }
 
@@ -144,6 +136,7 @@ pub struct BriefSummary {
     pub model: String,
     pub cost: f64,
     pub fresh: bool,
+    pub settled: bool,
     pub facts: usize,
     pub sources: usize,
 }
@@ -354,6 +347,7 @@ mod tests {
             trade: None,
             jev_cost: 0.0,
             research_cost: None,
+            settled: false,
         };
         let v =
             serde_json::to_value(RecommendationDetail { recommendation: r, state: json!({}), brief: None }).unwrap();

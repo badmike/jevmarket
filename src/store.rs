@@ -128,6 +128,24 @@ pub struct Bucket {
     pub avg_market: f64,
 }
 
+/// Money spent on OpenRouter.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Spend {
+    pub jev_calls: u32,
+    pub jev_usd: f64,
+    pub briefs: u32,
+    pub research_usd: f64,
+}
+
+impl std::ops::AddAssign for Spend {
+    fn add_assign(&mut self, o: Self) {
+        self.jev_calls += o.jev_calls;
+        self.jev_usd += o.jev_usd;
+        self.briefs += o.briefs;
+        self.research_usd += o.research_usd;
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Stats {
     pub decisions: i64,
@@ -376,6 +394,20 @@ impl Store {
         })?)
     }
 
+    /// All-time OpenRouter spend as logged: every brief, and one Jev call per decision. Jev calls
+    /// whose view was replaced before logging (a cached brief researched again) are not counted.
+    pub fn spend(&self) -> Result<Spend> {
+        let (jev_calls, jev_usd) =
+            self.conn.query_row("SELECT COUNT(*), COALESCE(SUM(jev_cost), 0) FROM decisions", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        let (briefs, research_usd) =
+            self.conn.query_row("SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM research", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+        Ok(Spend { jev_calls, jev_usd, briefs, research_usd })
+    }
+
     pub fn has_order_for(&self, condition_id: &str, include_dry_run: bool) -> Result<bool> {
         let dry = if include_dry_run { "" } else { " AND dry_run = 0" };
         let sql = format!(
@@ -480,6 +512,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = Store::open(&dir.path().join("t.db")).unwrap();
         (dir, st)
+    }
+
+    #[test]
+    fn spend_counts_briefs_and_logged_jev_calls() {
+        let (_dir, st) = store();
+        st.put_brief("a", &Brief { cost: 0.007, ..Brief::default() }, None).unwrap();
+        st.put_brief("b", &Brief { cost: 0.003, ..Brief::default() }, None).unwrap();
+        let state = json!({});
+        let decision = DecisionRow {
+            slug: "a",
+            condition_id: "c",
+            question: "Q?",
+            state: &state,
+            p_yes: None,
+            answerable: None,
+            clarity: 1,
+            yes_ask: None,
+            no_ask: None,
+            midpoint: None,
+            edge: None,
+            action: "skip",
+            reason: "r",
+            jev_model: None,
+            jev_cost: 0.0001,
+            research_cost: None,
+            raw: &state,
+        };
+        st.log_decision(&decision).unwrap();
+        let spend = st.spend().unwrap();
+        assert_eq!((spend.jev_calls, spend.briefs), (1, 2));
+        assert!((spend.research_usd - 0.01).abs() < 1e-9 && (spend.jev_usd - 0.0001).abs() < 1e-12);
     }
 
     #[test]

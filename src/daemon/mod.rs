@@ -20,7 +20,7 @@ use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
-use self::api::{LoopState, Spend, Status};
+use self::api::{LoopState, Status};
 use self::db::Db;
 use self::engine::Engine;
 use self::hub::{Hub, LogLayer};
@@ -57,8 +57,10 @@ pub async fn run(paths: Paths, args: Args) -> Result<()> {
     let opts = Options { dry_run_forced: args.dry_run, loop_secs: args.every, limit: args.limit };
     let s = settings(&paths, opts.dry_run_forced)?;
     let db_path = s.db_path(&paths);
+    let db = Db::open(&db_path)?;
     let hub = Hub::new(Status {
         version: env!("CARGO_PKG_VERSION"),
+        build: assets::build_id(),
         started_at: now(),
         state: LoopState::Waiting,
         loop_secs: opts.loop_secs,
@@ -67,14 +69,14 @@ pub async fn run(paths: Paths, args: Args) -> Result<()> {
         dry_run_forced: opts.dry_run_forced,
         pass: None,
         last_pass: None,
-        spend_total: Spend::default(),
+        spend_total: db.store.spend()?,
         last_error: None,
     });
     init_logging(&s, hub.clone());
 
     let (commands, command_rx) = mpsc::channel(32);
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let engine = Engine::new(paths.clone(), opts, hub.clone(), Db::open(&db_path)?);
+    let engine = Engine::new(paths.clone(), opts, hub.clone(), db);
     let engine_rx = shutdown_rx.clone();
     let engine = std::thread::Builder::new().name("engine".into()).spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

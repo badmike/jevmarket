@@ -26,13 +26,14 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::api::{
     BriefRecord, BriefSummary, ConfigView, Event, OrderEvent, Positions, Recommendation, RecommendationDetail,
-    SecretState, StatsView, Status,
+    SecretState, StatsView, Status, Transfer, Wallets,
 };
 use super::db::Db;
 use super::engine::{Command, ManualOrder};
 use super::hub::Hub;
 use super::{Options, assets, settings};
 use crate::config::{self, ENV_OVERRIDES, Paths, Settings};
+use crate::wallets::{self, Wallet};
 
 /// What the console must send in `confirm` before anything can place real orders.
 pub const LIVE_CONFIRM: &str = "LIVE";
@@ -83,6 +84,8 @@ pub fn router(state: AppState, base_path: &str) -> Router {
         .route("/briefs/refresh", post(refresh_brief))
         .route("/orders", get(orders).post(place_order))
         .route("/positions", get(positions))
+        .route("/wallets", get(wallets))
+        .route("/transfer", post(transfer))
         .route("/stats", get(stats))
         .route("/pass", post(run_pass))
         .route("/loop/pause", post(pause))
@@ -164,9 +167,9 @@ pub fn require_confirm(live: bool, confirm: Option<&str>) -> Result<(), ApiError
     Ok(())
 }
 
-/// Anything named `*_key` is a secret: write-only, reported as set or not.
+/// Secrets are write-only, reported as set or not.
 fn is_secret(key: &str) -> bool {
-    key.ends_with("_key")
+    config::SECRET_KEYS.contains(&key)
 }
 
 // --- errors -----------------------------------------------------------------------------------
@@ -268,6 +271,12 @@ async fn stats(State(st): Shared) -> ApiResult<StatsView> {
 
 async fn positions(State(st): Shared) -> ApiResult<Positions> {
     st.ask(Command::Positions).await.map(Json)
+}
+
+/// Both wallets of the key with their pUSD, read on-chain.
+async fn wallets(State(st): Shared) -> ApiResult<Wallets> {
+    let s = st.settings()?;
+    wallets::load(&s).await.map(Json).map_err(ApiError::failed)
 }
 
 /// Server-sent events: every [`Event`] as JSON in `data`, a comment every 15 s so proxies keep
@@ -392,10 +401,10 @@ struct Confirm {
     confirm: Option<String>,
 }
 
-/// Start a pass now. Taken as JSON, like every write: a cross-site form cannot send that
-/// without a CORS preflight, which this server never answers.
-async fn run_pass(State(st): Shared, Json(body): Json<Confirm>) -> Result<StatusCode, ApiError> {
-    require_confirm(!st.settings()?.dry_run, body.confirm.as_deref())?;
+/// Start a pass now. No confirmation even when live: it only brings the next scheduled pass
+/// forward, under the same caps. Taken as JSON, like every write: a cross-site form cannot send
+/// that without a CORS preflight, which this server never answers.
+async fn run_pass(State(st): Shared, Json(_): Json<Confirm>) -> Result<StatusCode, ApiError> {
     st.ask(Command::RunPass).await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -438,6 +447,29 @@ async fn decide(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<Rec
 async fn refresh_brief(State(st): Shared, Json(body): Json<MarketRef>) -> ApiResult<BriefRecord> {
     let reference = body.reference()?;
     st.ask(|reply| Command::RefreshBrief { reference, reply }).await.map(Json)
+}
+
+#[derive(Deserialize)]
+struct TransferRequest {
+    from: Wallet,
+    /// `None` moves everything.
+    amount_usd: Option<f64>,
+}
+
+/// Move pUSD to the key's other wallet. No typed confirmation: both ends are derived from the key,
+/// so money never leaves your two wallets, whatever the config says.
+async fn transfer(State(st): Shared, Json(body): Json<TransferRequest>) -> ApiResult<Transfer> {
+    let s = st.settings()?;
+    let t = wallets::transfer(&s, body.from, body.amount_usd).await.map_err(ApiError::failed)?;
+    tracing::info!(
+        "moved ${:.2} pUSD from the {} to the {}: {}",
+        t.amount_usd,
+        t.from.label(),
+        t.to.label(),
+        t.tx_hash
+    );
+    st.hub.emit(Event::PositionsChanged);
+    Ok(Json(t))
 }
 
 #[derive(Deserialize)]
@@ -530,9 +562,11 @@ mod tests {
         let p = paths(&dir);
         let key = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
         config::set(&p.config, "polymarket_private_key", key).unwrap();
+        config::set(&p.config, "polymarket_builder_passphrase", "hunter2-passphrase").unwrap();
         let view = serde_json::to_string(&config_view(&p, false).unwrap()).unwrap();
         assert!(!view.contains(key) && !view.contains(&key[key.len() - 4..]), "{view}");
         assert!(view.contains(r#"{"key":"polymarket_private_key","set":true}"#), "{view}");
+        assert!(!view.contains("hunter2"), "secrets not named *_key stay hidden too: {view}");
         assert!(!view.contains("\"openrouter_api_key\":"), "no secret key among values or defaults");
     }
 
