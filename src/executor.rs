@@ -2,12 +2,9 @@
 
 use std::collections::HashSet;
 use std::str::FromStr as _;
-use std::time::Duration;
 
-use alloy::providers::ProviderBuilder;
 use alloy::signers::Signer as _;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol;
 use anyhow::{Context as _, Result, bail};
 use futures::TryStreamExt as _;
 use polymarket_client_sdk_v2::auth::Normal;
@@ -18,7 +15,7 @@ use polymarket_client_sdk_v2::clob::types::{OrderType, Side, SignatureType};
 use polymarket_client_sdk_v2::data::types::request::PositionsRequest;
 use polymarket_client_sdk_v2::data::types::response::Position;
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
-use polymarket_client_sdk_v2::{POLYGON, clob, contract_config, data, derive_proxy_wallet, derive_safe_wallet};
+use polymarket_client_sdk_v2::{POLYGON, clob, data, derive_proxy_wallet, derive_safe_wallet};
 use rust_decimal::prelude::ToPrimitive as _;
 use serde_json::json;
 
@@ -26,20 +23,6 @@ use crate::config::Settings;
 use crate::markets::Candidate;
 use crate::signal::Trade;
 use crate::store::{OrderRow, Store};
-
-sol! {
-    #[sol(rpc)]
-    interface IERC20 {
-        function approve(address spender, uint256 value) external returns (bool);
-        function allowance(address owner, address spender) external view returns (uint256);
-    }
-
-    #[sol(rpc)]
-    interface IERC1155 {
-        function setApprovalForAll(address operator, bool approved) external;
-        function isApprovedForAll(address account, address operator) external view returns (bool);
-    }
-}
 
 const POSITIONS_PAGE: i32 = 500;
 
@@ -85,33 +68,39 @@ pub struct Executor<'a> {
 
 impl<'a> Executor<'a> {
     pub async fn create(s: &'a Settings, store: &'a Store, dry_run: bool) -> Result<Self> {
-        let key = s.polymarket_private_key.trim();
         let mut ex = Self {
             s,
             store,
             dry_run,
             data: data::Client::default(),
             trader: None,
-            wallet: s.polymarket_wallet,
+            wallet: s.polymarket_deposit_wallet,
             trades_this_run: 0,
             exposure: None,
         };
-        if key.trim_start_matches("0x").len() != 64 {
-            if !dry_run {
-                bail!(
-                    "polymarket_private_key must be a 32-byte hex key to trade live \
-                     (a 0x…40-hex value is an address, not a key)"
-                );
+        let signer = match signer(s) {
+            Ok(signer) => signer,
+            Err(e) if !dry_run => return Err(e),
+            Err(_) => {
+                tracing::info!("no private key: dry run with address-only exposure for {}", ex.wallet_label());
+                return Ok(ex);
             }
-            tracing::info!("no private key: dry run with address-only exposure for {}", ex.wallet_label());
-            return Ok(ex);
-        }
-
-        let signer =
-            PrivateKeySigner::from_str(key).context("invalid polymarket_private_key")?.with_chain_id(Some(POLYGON));
+        };
         let eoa = signer.address();
-        let funder = s.polymarket_wallet.filter(|w| *w != eoa);
+        let funder = s.polymarket_deposit_wallet.filter(|w| *w != eoa);
         let kind = wallet_kind(eoa, funder);
+        if let Some(w) = funder.filter(|_| kind == SignatureType::Poly1271) {
+            // Any address that is not this key's proxy or Safe counts as a deposit wallet, so a
+            // mistyped one would only surface as cryptic order rejections. Check it on-chain.
+            match crate::deposit_wallet::address_of(eoa, &s.polygon_rpc_url).await {
+                Ok(expected) if expected != w => bail!(
+                    "polymarket_deposit_wallet {w} is not the deposit wallet of this key ({expected}); \
+                     run `jevmarket setup`, which sets it"
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("could not verify the deposit wallet: {e:#}"),
+            }
+        }
         let mut auth = clob::Client::new(&s.clob_host, clob::Config::default())?
             .authentication_builder(&signer)
             .signature_type(kind);
@@ -276,7 +265,16 @@ impl<'a> Executor<'a> {
                     Ok(resp) => {
                         (resp.error_msg.clone().unwrap_or_else(|| resp.status.to_string()), Some(response_json(&resp)))
                     }
-                    Err(e) => (format!("{e:#}"), None),
+                    Err(e) => {
+                        let message = exchange_error(&format!("{e:#}"));
+                        let response = json!({ "error_msg": message });
+                        (message, Some(response))
+                    }
+                };
+                let message = if message.contains("deposit wallet flow") {
+                    format!("{message} (run `jevmarket setup` to create your deposit wallet)")
+                } else {
+                    message
                 };
                 self.store.log_order(&OrderRow { status: "rejected", response: response.as_ref(), ..row })?;
                 tracing::warn!("REJECTED {slug}: {message}");
@@ -293,33 +291,24 @@ impl<'a> Executor<'a> {
         }
     }
 
-    /// One-time ERC-20 (pUSD) and ERC-1155 (outcome token) approvals for the exchange contracts.
-    /// Only raw EOAs need this; Polymarket manages approvals for its own wallets. The public
-    /// Polygon RPC fails intermittently mid-batch; granted approvals are skipped, so retry.
-    pub async fn setup_approvals(&self, attempts: u32) -> Result<String> {
-        let Some(t) = &self.trader else { bail!("setup needs polymarket_private_key") };
-        if t.kind != SignatureType::Eoa {
-            return Ok(format!("nothing to do: approvals for a {} are managed by Polymarket", self.wallet_type()));
-        }
-        let mut last = None;
-        for attempt in 1..=attempts {
-            match approve_all(&t.signer, &self.s.polygon_rpc_url).await {
-                Ok(()) => {
-                    // Let the CLOB refresh its cached view of the new allowances.
-                    if let Err(e) = t.client.update_balance_allowance(BalanceAllowanceRequest::default()).await {
-                        tracing::warn!("balance cache refresh failed: {e}");
-                    }
-                    return Ok("fully approved".into());
-                }
-                Err(e) => {
-                    tracing::warn!("approvals attempt {attempt}/{attempts}: {e:#}");
-                    last = Some(e);
-                    tokio::time::sleep(Duration::from_secs(2 * u64::from(attempt))).await;
-                }
-            }
-        }
-        Err(last.expect("at least one attempt").context(format!("approvals incomplete after {attempts} attempts")))
+    /// Let the CLOB refresh its cached view of the wallet's balance and allowances.
+    pub async fn sync_allowances(&self) -> Result<()> {
+        let Some(t) = &self.trader else { bail!("syncing allowances needs polymarket_private_key") };
+        t.client.update_balance_allowance(BalanceAllowanceRequest::default()).await?;
+        Ok(())
     }
+}
+
+/// The signing key from `polymarket_private_key`.
+pub fn signer(s: &Settings) -> Result<PrivateKeySigner> {
+    let key = s.polymarket_private_key.trim();
+    if key.trim_start_matches("0x").len() != 64 {
+        bail!(
+            "polymarket_private_key must be a 32-byte hex key to trade live \
+             (a 0x…40-hex value is an address, not a key)"
+        );
+    }
+    Ok(PrivateKeySigner::from_str(key).context("invalid polymarket_private_key")?.with_chain_id(Some(POLYGON)))
 }
 
 /// How `eoa` controls `funder`: Polymarket derives Safe and proxy wallets from the signer's
@@ -358,6 +347,18 @@ async fn post_limit_buy(t: &Trader, token_id: U256, price: f64, size: f64) -> Re
     Ok(t.client.post_order(signed).await?)
 }
 
+/// The exchange's own words from an SDK error, which repeats them around the status and URL:
+/// `... /order with {"error":"not enough balance"}: ...` gives `not enough balance`.
+fn exchange_error(error: &str) -> String {
+    const START: &str = r#"{"error":""#;
+    error
+        .find(START)
+        .map(|i| &error[i..])
+        .and_then(|rest| serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>().next()?.ok())
+        .and_then(|v| v["error"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| error.to_owned())
+}
+
 fn response_json(r: &PostOrderResponse) -> serde_json::Value {
     json!({
         "order_id": r.order_id,
@@ -370,30 +371,14 @@ fn response_json(r: &PostOrderResponse) -> serde_json::Value {
     })
 }
 
-async fn approve_all(signer: &PrivateKeySigner, rpc_url: &str) -> Result<()> {
-    let provider =
-        ProviderBuilder::new().wallet(signer.clone()).connect_http(rpc_url.parse().context("invalid polygon_rpc_url")?);
-    let owner = signer.address();
-    let (standard, neg_risk) = (
-        contract_config(POLYGON, false).context("no Polygon contract config")?,
-        contract_config(POLYGON, true).context("no Polygon neg-risk contract config")?,
-    );
-    let collateral = IERC20::new(standard.collateral, &provider);
-    let ctf = IERC1155::new(standard.conditional_tokens, &provider);
-    let spenders = [
-        ("CTF Exchange V2", standard.exchange_v2),
-        ("Neg Risk CTF Exchange V2", neg_risk.exchange_v2),
-        ("Neg Risk Adapter", neg_risk.neg_risk_adapter),
-    ];
-    for (name, spender) in spenders.into_iter().filter_map(|(n, a)| a.map(|a| (n, a))) {
-        if collateral.allowance(owner, spender).call().await? < U256::MAX >> 1 {
-            let tx = collateral.approve(spender, U256::MAX).send().await?.watch().await?;
-            tracing::info!("pUSD approved for {name}: {tx}");
-        }
-        if !ctf.isApprovedForAll(owner, spender).call().await? {
-            let tx = ctf.setApprovalForAll(spender, true).send().await?.watch().await?;
-            tracing::info!("outcome tokens approved for {name}: {tx}");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exchange_error_keeps_the_exchanges_words() {
+        let sdk = r#"Status: error(400 Bad Request) making POST call to /order with {"error":"maker address not allowed, please use the deposit wallet flow"}: error(400 Bad Request) making POST call to /order with {"error":"maker address not allowed, please use the deposit wallet flow"}"#;
+        assert_eq!(exchange_error(sdk), "maker address not allowed, please use the deposit wallet flow");
+        assert_eq!(exchange_error("timed out"), "timed out");
     }
-    Ok(())
 }

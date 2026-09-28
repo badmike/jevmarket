@@ -13,12 +13,11 @@ use indexmap::IndexMap;
 use inquire::validator::Validation;
 use inquire::{Confirm, CustomType, InquireError, Password, PasswordDisplayMode, Select, Text};
 use polymarket_client_sdk_v2::clob;
-use polymarket_client_sdk_v2::clob::types::SignatureType;
 use polymarket_client_sdk_v2::types::Address;
 use serde_json::{Map, Value, json};
 
 use crate::config::{self, Paths, Settings};
-use crate::executor::{Executor, kind_label, wallet_kind};
+use crate::executor::Executor;
 use crate::jev::{JevClient, Question};
 use crate::openrouter::{OpenRouter, OpenRouterError, Policy};
 use crate::store::Store;
@@ -63,7 +62,6 @@ struct Answers {
     changes: Map<String, Value>,
     openrouter_key: String,
     private_key: Option<String>,
-    raw_eoa: bool,
 }
 
 async fn wizard(paths: &Paths) -> Result<()> {
@@ -78,7 +76,7 @@ async fn wizard(paths: &Paths) -> Result<()> {
         println!("{}", style(format!("Updating {}; current values are the defaults.", paths.config.display())).dim());
     }
 
-    let mut answers = Answers { changes: Map::new(), openrouter_key: String::new(), private_key: None, raw_eoa: false };
+    let mut answers = Answers { changes: Map::new(), openrouter_key: String::new(), private_key: None };
     let api = openrouter_step(&current, &mut answers).await?;
     models_step(&current, &api, &mut answers).await?;
     polymarket_step(&current, &mut answers).await?;
@@ -292,71 +290,34 @@ async fn polymarket_step(current: &Settings, answers: &mut Answers) -> Result<()
         }
     }
 
-    let options = vec![
-        "A polymarket.com account: deposit on the site, easiest (recommended)",
-        "My own wallet (raw EOA): I hold USDC.e and pay gas myself",
-        "Not now: dry runs only, set up trading later",
-    ];
-    // Recommended option first, unless a raw-EOA setup is already configured.
-    let start = usize::from(!current.polymarket_private_key.is_empty() && current.polymarket_wallet.is_none());
-    let mode = Select::new("How will you trade?", options).with_starting_cursor(start).raw_prompt()?.index;
-
-    match mode {
-        0 => {
-            step(1, "Sign up and deposit; deposits arrive as pUSD", "https://polymarket.com");
-            step_text(
-                2,
-                "Export the private key of the account you log in with: email and social logins offer a key export \
-                 in Polymarket's settings; for MetaMask or another browser wallet, export it from that wallet app",
-            );
-            step_text(3, "Copy your Polymarket wallet address (shown with your profile and on the deposit screen)");
-            let key = ask_private_key(current)?;
-            let eoa = signer(&key).address();
-            println!("  signer address: {eoa}");
-            let wallet = ask_wallet(current, true)?.expect("required");
-            let kind = wallet_kind(eoa, Some(wallet));
-            match kind {
-                SignatureType::GnosisSafe | SignatureType::Proxy => {
-                    ok(&format!("{wallet} is the {} wallet of this key", kind_label(kind)));
-                }
-                SignatureType::Eoa => warn("that is the signer address itself; trading as a raw EOA"),
-                _ => {
-                    warn(&format!(
-                        "{wallet} is not the Safe or proxy wallet of this key, so it will be used as a deposit wallet.\n  \
-                         If you expected a Safe or proxy wallet, the key belongs to a different login."
-                    ));
-                    if !Confirm::new("Keep this address?").with_default(true).prompt()? {
-                        bail!(InquireError::OperationCanceled);
-                    }
-                }
-            }
-            answers.raw_eoa = kind == SignatureType::Eoa;
-            // A raw EOA needs no funder address.
-            answers.changes.insert("polymarket_wallet".into(), json!((wallet != eoa).then_some(wallet)));
-            answers.private_key = Some(key);
+    let options =
+        vec!["Trade from my polymarket.com account (recommended)", "Not now: dry runs only, set up trading later"];
+    if Select::new("How will you trade?", options).raw_prompt()?.index == 0 {
+        step(1, "Sign up and deposit; deposits arrive as pUSD", "https://polymarket.com");
+        step_text(
+            2,
+            "Export the private key of the account you log in with: email and social logins offer a key export \
+             in Polymarket's settings; for MetaMask or another browser wallet, export it from that wallet app",
+        );
+        step(
+            3,
+            "Create builder API credentials under Settings, Builder",
+            "https://polymarket.com/settings?tab=builder",
+        );
+        step_text(
+            4,
+            "After this setup, run `jevmarket setup`: it creates the deposit wallet Polymarket requires for API \
+             trading, approves the exchange and shows where to send funds",
+        );
+        let key = ask_private_key(current)?;
+        println!("  signer address: {}", signer(&key).address());
+        answers.private_key = Some(key);
+    } else {
+        println!("Dry runs work without a key. A wallet address lets them respect your real exposure.");
+        if let Some(wallet) = ask_wallet(current, false)? {
+            answers.changes.insert("polymarket_deposit_wallet".into(), json!(wallet));
         }
-        1 => {
-            step_text(
-                1,
-                "Hold USDC.e (0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174) and a little POL for gas on Polygon",
-            );
-            step_text(
-                2,
-                "Wrap it to pUSD: approve the CollateralOnramp (0x93070a847efEf7F70739046A929D47a521F5B8ee) \
-                 and call wrap(USDC_E, you, amount)",
-            );
-            step_text(3, "After this setup, run `jevmarket setup` once for the exchange approvals");
-            answers.private_key = Some(ask_private_key(current)?);
-            answers.raw_eoa = true;
-            answers.changes.insert("polymarket_wallet".into(), Value::Null);
-        }
-        _ => {
-            println!("Dry runs work without a key. A wallet address lets them respect your real exposure.");
-            if let Some(wallet) = ask_wallet(current, false)? {
-                answers.changes.insert("polymarket_wallet".into(), json!(wallet));
-            }
-            return Ok(());
-        }
+        return Ok(());
     }
 
     if Confirm::new("Connect to Polymarket now and check your pUSD balance?").with_default(true).prompt()? {
@@ -406,7 +367,7 @@ fn ask_wallet(current: &Settings, required: bool) -> Result<Option<Address>> {
             _ => Validation::Invalid("not an address (0x + 40 hex characters)".into()),
         })
     };
-    let default = current.polymarket_wallet.map(|w| w.to_string()).unwrap_or_default();
+    let default = current.polymarket_deposit_wallet.map(|w| w.to_string()).unwrap_or_default();
     let label = if required { "Polymarket wallet address:" } else { "Wallet address (optional, Enter to skip):" };
     let text = Text::new(label).with_initial_value(&default).with_validator(validator).prompt()?;
     Ok(Address::from_str(text.trim()).ok())
@@ -538,8 +499,8 @@ fn save_step(paths: &Paths, mut answers: Answers) -> Result<()> {
         ("jevmarket decide <slug|url>", "research + Jev on one market, never trades"),
         ("jevmarket run --dry-run", "the full pipeline, orders only logged"),
     ];
-    if answers.raw_eoa {
-        next.push(("jevmarket setup", "one-time exchange approvals for your wallet"));
+    if answers.private_key.is_some() {
+        next.push(("jevmarket setup", "create and approve your deposit wallet, then fund it"));
     }
     next.push(("jevmarket config set dry_run false", "when `stats` convinces you, go live"));
     for (i, (cmd, what)) in next.iter().enumerate() {

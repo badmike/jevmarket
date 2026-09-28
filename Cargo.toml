@@ -31,6 +31,7 @@ axum = { version = "0.8", default-features = false, features = [
   "query",
   "tokio",
 ] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = [
   "clock",
   "serde",
@@ -41,9 +42,11 @@ console = "0.16"
 etcetera = "0.11"
 fastrand = "2"
 futures = "0.3"
+hmac = "0.12"
 indexmap = { version = "2", features = ["serde"] }
 inquire = "0.9"
 polymarket_client_sdk_v2 = { version = "0.8", features = [
+  "bridge",
   "clob",
   "data",
   "gamma",
@@ -56,6 +59,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 rust_decimal = "1.43"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = [
   "macros",

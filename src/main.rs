@@ -2,16 +2,19 @@
 
 mod config;
 mod daemon;
+mod deposit_wallet;
 mod executor;
 mod jev;
 mod markets;
 mod onboard;
 mod openrouter;
 mod pipeline;
+mod relayer;
 mod research;
 mod signal;
 mod store;
 mod ui;
+mod wallets;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -104,7 +107,7 @@ enum Command {
         #[arg(long)]
         no_research: bool,
     },
-    /// One-time on-chain approvals so the exchange can move your pUSD and outcome tokens.
+    /// Create and approve the deposit wallet Polymarket requires for API trading, and show how to fund it.
     Setup,
     /// Show wallet balance, open positions and open orders.
     Positions,
@@ -112,6 +115,17 @@ enum Command {
     Stats,
     /// Fetch outcomes of decided or ordered markets that have resolved since the last check.
     Resolve,
+    /// Move pUSD between the deposit wallet and your polymarket.com wallet, without gas.
+    Transfer {
+        /// Wallet to move from; the pUSD goes to the other one.
+        #[arg(value_enum)]
+        from: wallets::Wallet,
+        /// Amount in USD, or `all`.
+        amount: String,
+        /// Skip the confirmation.
+        #[arg(short, long)]
+        yes: bool,
+    },
     /// Run the trading loop in the background and serve a live web console for it.
     Daemon(daemon::Args),
     /// Inspect or edit the config file.
@@ -191,6 +205,7 @@ async fn dispatch(cli: Cli) -> Result<()> {
         Command::Setup => setup(&s, &paths).await,
         Command::Positions => positions(&s, &paths).await,
         Command::Stats => stats(&s, &paths),
+        Command::Transfer { from, amount, yes } => transfer(&s, from, &amount, yes).await,
         Command::Resolve => {
             let n = update_resolutions(&gamma::Client::default(), &open_store(&s, &paths)?).await?;
             println!("{n} new resolutions");
@@ -420,11 +435,67 @@ async fn run_pass(
     Ok(())
 }
 
+/// Deploy and approve the deposit wallet, point `polymarket_deposit_wallet` at it, and say how to fund it.
 async fn setup(s: &Settings, paths: &Paths) -> Result<()> {
-    let store = open_store(s, paths)?;
-    let ex = Executor::create(s, &store, false).await?;
-    println!("wallet {} ({})", ex.wallet_label(), ex.wallet_type());
-    println!("{}", ex.setup_approvals(6).await?);
+    let signer = executor::signer(s)?;
+    println!("signer {}", signer.address());
+    let ready = deposit_wallet::ensure(&signer, s).await?;
+    let wallet = ready.wallet;
+    println!(
+        "deposit wallet {wallet}: {}, {}",
+        if ready.deployed_now { "deployed now" } else { "deployed" },
+        match ready.approved_now {
+            0 => "exchange approved".to_owned(),
+            n => format!("{n} exchange approvals granted now"),
+        }
+    );
+    if s.polymarket_deposit_wallet != Some(wallet) {
+        config::set(&paths.config, "polymarket_deposit_wallet", &wallet.to_string())?;
+        let old = s.polymarket_deposit_wallet.map_or_else(|| "none".to_owned(), |w| w.to_string());
+        println!("polymarket_deposit_wallet: {old} -> {wallet}");
+    }
+
+    let s = Settings { polymarket_deposit_wallet: Some(wallet), ..s.clone() };
+    let store = open_store(&s, paths)?;
+    let ex = Executor::create(&s, &store, true).await?;
+    ex.sync_allowances().await?;
+    let balance = ex.collateral_balance_usd().await.unwrap_or_default();
+    println!("pUSD balance: ${balance:.2}");
+    if balance < 1.0 {
+        let deposit = deposit_wallet::funding_address(wallet).await?;
+        println!(
+            "\nFund it: send USDC on Polygon to the bridge address {deposit}. The bridge credits it to the \
+             deposit wallet {wallet} as pUSD; keep polymarket_deposit_wallet on the deposit wallet.\n\
+             From polymarket.com: Withdraw, receive token USDC, chain Polygon, recipient {deposit}. Funds in an \
+             older Polymarket wallet stay there until you move them."
+        );
+    }
+    Ok(())
+}
+
+async fn transfer(s: &Settings, from: wallets::Wallet, amount: &str, yes: bool) -> Result<()> {
+    let amount = match amount.trim() {
+        "all" => None,
+        n => Some(
+            n.trim_start_matches('$')
+                .parse::<f64>()
+                .map_err(|_| anyhow::anyhow!("amount must be a number or `all`"))?,
+        ),
+    };
+    let w = wallets::load(s).await?;
+    for warning in &w.warnings {
+        println!("{}", style(warning).yellow());
+    }
+    let (source, target) = (w.get(from), w.get(from.other()));
+    println!("{:<22} {}  ${:.2}", from.label(), source.address, source.balance_usd);
+    println!("{:<22} {}  ${:.2}", from.other().label(), target.address, target.balance_usd);
+    let shown = amount.map_or_else(|| format!("all ${:.2}", source.balance_usd), |a| format!("${a:.2}"));
+    let prompt = format!("Move {shown} pUSD from the {} to the {}?", from.label(), from.other().label());
+    if !yes && !inquire::Confirm::new(&prompt).with_default(false).prompt()? {
+        bail!("cancelled");
+    }
+    let t = wallets::transfer(s, from, amount).await?;
+    println!("moved ${:.2} to the {}: https://polygonscan.com/tx/{}", t.amount_usd, t.to.label(), t.tx_hash);
     Ok(())
 }
 

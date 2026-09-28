@@ -16,13 +16,26 @@ use serde_json::{Map, Value};
 use crate::research::DEFAULT_EXCLUDE_DOMAINS;
 
 /// Environment variables that override a config key. Secrets belong here or in a 0600 file.
-pub const ENV_OVERRIDES: [(&str, &str); 3] = [
+pub const ENV_OVERRIDES: [(&str, &str); 8] = [
     ("OPENROUTER_API_KEY", "openrouter_api_key"),
     ("POLYMARKET_PRIVATE_KEY", "polymarket_private_key"),
-    ("POLYMARKET_WALLET", "polymarket_wallet"),
+    ("POLYMARKET_DEPOSIT_WALLET", "polymarket_deposit_wallet"),
+    // The name before proxy and deposit wallets were configured apart.
+    ("POLYMARKET_WALLET", "polymarket_deposit_wallet"),
+    ("POLYMARKET_PROXY_WALLET", "polymarket_proxy_wallet"),
+    ("POLYMARKET_BUILDER_API_KEY", "polymarket_builder_api_key"),
+    ("POLYMARKET_BUILDER_SECRET", "polymarket_builder_secret"),
+    ("POLYMARKET_BUILDER_PASSPHRASE", "polymarket_builder_passphrase"),
 ];
 
-const SECRET_KEYS: [&str; 2] = ["openrouter_api_key", "polymarket_private_key"];
+/// Keys that never leave the process: masked in `config show`, write-only in the console.
+pub const SECRET_KEYS: [&str; 5] = [
+    "openrouter_api_key",
+    "polymarket_private_key",
+    "polymarket_builder_api_key",
+    "polymarket_builder_secret",
+    "polymarket_builder_passphrase",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -30,9 +43,17 @@ pub struct Settings {
     // --- keys ---------------------------------------------------------------
     pub openrouter_api_key: String,
     pub polymarket_private_key: String,
-    /// Polymarket wallet (proxy, Safe or deposit wallet) when funded via polymarket.com.
-    /// Leave empty for a raw EOA; the wallet type is detected from the address.
-    pub polymarket_wallet: Option<Address>,
+    /// The deposit wallet orders are placed from: Polymarket only takes API orders from one.
+    /// `jevmarket setup` creates it and sets this. Empty trades as a raw EOA.
+    pub polymarket_deposit_wallet: Option<Address>,
+    /// Your polymarket.com wallet (the proxy wallet of the key), the other end of `transfer`.
+    /// Empty uses the proxy wallet derived from the key.
+    pub polymarket_proxy_wallet: Option<Address>,
+    /// Builder API credentials (polymarket.com, Settings, Builder). Only `setup` needs them, to
+    /// deploy the deposit wallet and approve the exchange through Polymarket's gas-free relayer.
+    pub polymarket_builder_api_key: String,
+    pub polymarket_builder_secret: String,
+    pub polymarket_builder_passphrase: String,
 
     // --- endpoints ----------------------------------------------------------
     pub openrouter_base_url: String,
@@ -87,6 +108,10 @@ pub struct Settings {
     pub min_market_price: f64,
     pub max_market_price: f64,
     pub description_max_chars: usize,
+    /// Skip markets with any of these Polymarket tags. The defaults are settled by a live price,
+    /// a post count or a single game: research cannot make Jev answer them, so they only burn
+    /// briefs and candidate slots.
+    pub exclude_tags: Vec<String>,
 
     // --- hard caps (enforced in the executor) -------------------------------
     pub max_usd_per_trade: f64,
@@ -107,10 +132,14 @@ impl Default for Settings {
         Self {
             openrouter_api_key: String::new(),
             polymarket_private_key: String::new(),
-            polymarket_wallet: None,
+            polymarket_deposit_wallet: None,
+            polymarket_proxy_wallet: None,
+            polymarket_builder_api_key: String::new(),
+            polymarket_builder_secret: String::new(),
+            polymarket_builder_passphrase: String::new(),
             openrouter_base_url: "https://openrouter.ai/api".into(),
             clob_host: "https://clob.polymarket.com".into(),
-            polygon_rpc_url: "https://polygon-rpc.com".into(),
+            polygon_rpc_url: "https://polygon-bor-rpc.publicnode.com".into(),
             jev_model: "typesafe/jev-1.13".into(),
             jev_sees_market_price: true,
             research_enabled: true,
@@ -135,6 +164,7 @@ impl Default for Settings {
             min_market_price: 0.03,
             max_market_price: 0.97,
             description_max_chars: 1_500,
+            exclude_tags: ["Crypto Prices", "Hit Price", "Tweet Markets", "Games"].map(String::from).to_vec(),
             max_usd_per_trade: 5.0,
             max_open_exposure_usd: 50.0,
             max_trades_per_run: 3,
@@ -245,12 +275,21 @@ pub fn update(path: &Path, changes: Map<String, Value>) -> Result<()> {
     write_doc(path, &doc)
 }
 
+/// Keys renamed since they shipped: `(old, new)`. Read under the new name, written back under it.
+const RENAMED_KEYS: [(&str, &str); 1] = [("polymarket_wallet", "polymarket_deposit_wallet")];
+
 fn read_doc(path: &Path) -> Result<Map<String, Value>> {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} is not a JSON object", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Map::new()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    let mut doc: Map<String, Value> = match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).with_context(|| format!("{} is not a JSON object", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    for (old, new) in RENAMED_KEYS {
+        if let Some(value) = doc.remove(old) {
+            doc.entry(new).or_insert(value);
+        }
     }
+    Ok(doc)
 }
 
 fn write_doc(path: &Path, doc: &Map<String, Value>) -> Result<()> {
@@ -299,10 +338,26 @@ mod tests {
     }
 
     #[test]
+    fn renamed_keys_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"polymarket_wallet": "0x0b89b53e12F1470D6884D88B511Ae3801986DB3D"}"#).unwrap();
+        assert!(Settings::load(&path).unwrap().polymarket_deposit_wallet.is_some());
+        set(&path, "min_edge", "0.1").unwrap();
+        let doc = read_doc(&path).unwrap();
+        assert!(
+            doc.contains_key("polymarket_deposit_wallet")
+                && !fs::read_to_string(&path).unwrap().contains("\"polymarket_wallet\"")
+        );
+    }
+
+    #[test]
     fn redacted_masks_secrets() {
         let s = Settings { openrouter_api_key: "sk-or-v1-abcdef".into(), ..Settings::default() };
         let v = s.redacted();
         assert_eq!(v["openrouter_api_key"], "…cdef");
         assert_eq!(v["polymarket_private_key"], "");
+        let s = Settings { polymarket_builder_passphrase: "passphrase".into(), ..Settings::default() };
+        assert_eq!(s.redacted()["polymarket_builder_passphrase"], "…rase");
     }
 }
