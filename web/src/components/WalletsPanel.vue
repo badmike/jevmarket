@@ -7,6 +7,7 @@ import StatTile from '~/components/StatTile.vue'
 import TransferDialog from '~/components/TransferDialog.vue'
 import { Alert, AlertDescription } from '~/components/ui/alert'
 import { Skeleton } from '~/components/ui/skeleton'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import { usd } from '~/lib/format'
 
 /**
@@ -81,6 +82,7 @@ const walletsPending = computed(() => !data.value && !error.value)
       <StatTile
         v-else
         title="At risk"
+        hint="Money in positions plus buy orders still waiting to fill. At the cap set in Settings, the bot stops buying."
         icon="lucide:gauge"
       >
         <ExposureGauge
@@ -128,7 +130,12 @@ const walletsPending = computed(() => !data.value && !error.value)
           <div class="flex flex-wrap items-center justify-between gap-2">
             <p class="text-xl font-semibold text-primary tabular-nums">
               {{ usd(data[row.kind].balance_usd) }}
-              <span class="text-sm font-normal text-muted">pUSD</span>
+              <SimpleTooltip
+                tooltip="pUSD is the dollar token Polymarket trades in. One pUSD is worth one US dollar."
+                as-child
+              >
+                <span class="text-sm font-normal text-muted underline decoration-muted/50 decoration-dotted underline-offset-4">pUSD</span>
+              </SimpleTooltip>
             </p>
             <TransferDialog
               :from="row.kind"

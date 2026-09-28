@@ -10,18 +10,24 @@ import { EmptyState } from '~/components/ui/empty-state'
 import { Skeleton } from '~/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '~/components/ui/table'
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import { count, percent, prob, signedUsd, usd } from '~/lib/format'
 
 const { data, error, isPending, refetch } = useStats()
 
 type GroupKey = 'by_edge' | 'by_answerable' | 'by_clarity' | 'by_variant'
 const groupBy = ref<GroupKey>('by_edge')
-const groupTabs: { value: GroupKey; label: string }[] = [
-  { value: 'by_edge', label: 'Edge' },
-  { value: 'by_answerable', label: 'Answerable' },
-  { value: 'by_clarity', label: 'Clarity' },
-  { value: 'by_variant', label: 'Market price in state' },
+const groupTabs: { value: GroupKey; label: string; hint: string }[] = [
+  { value: 'by_edge', label: 'Edge', hint: "Edge: how much better Jev's estimate is than the market price." },
+  {
+    value: 'by_answerable',
+    label: 'Answerable',
+    hint: 'Answerable: how sure Jev was that it had enough information to judge the question.',
+  },
+  { value: 'by_clarity', label: 'Clarity', hint: "Clarity: how clear the market's resolution rules are, from 0 to 4." },
+  { value: 'by_variant', label: 'Market price in state', hint: 'Whether Jev saw the market price when it decided.' },
 ]
+const groupHint = computed(() => groupTabs.find((t) => t.value === groupBy.value)?.hint)
 
 const all = computed(() => data.value?.calibration.all)
 const groups = computed<Group[]>(() => data.value?.calibration[groupBy.value] ?? [])
@@ -85,6 +91,7 @@ const pnlDetail = (p: Pnl) =>
       <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <StatTile
           title="Decisions"
+          hint="A decision is Jev's estimate for one market, with a verdict to buy or skip. Trade signals are the buys."
           icon="lucide:scale"
           :detail="`${count(data.trade_signals)} trade signals`"
         >
@@ -92,6 +99,7 @@ const pnlDetail = (p: Pnl) =>
         </StatTile>
         <StatTile
           title="Briefs"
+          hint="A brief is the researcher's summary of recent news and facts on a market. Jev prices from it."
           icon="lucide:newspaper"
           :detail="`${usd(data.research_cost_usd, true)} on research`"
         >
@@ -99,6 +107,7 @@ const pnlDetail = (p: Pnl) =>
         </StatTile>
         <StatTile
           title="OpenRouter spend"
+          hint="What the AI models cost: Jev's price estimates plus the web research for briefs."
           icon="lucide:coins"
           :detail="`Jev ${usd(data.jev_cost_usd, true)}, research ${usd(data.research_cost_usd, true)}`"
         >
@@ -106,6 +115,7 @@ const pnlDetail = (p: Pnl) =>
         </StatTile>
         <StatTile
           title="Live orders"
+          hint="Real orders placed on Polymarket. Dry runs are not counted."
           icon="lucide:receipt"
           :detail="`${usd(data.live_usd)} placed`"
         >
@@ -117,8 +127,8 @@ const pnlDetail = (p: Pnl) =>
         <div class="grid gap-1">
           <h2 class="text-base font-semibold text-primary">Calibration</h2>
           <p class="text-sm text-muted">
-            Brier score: the mean squared error of a probability against the outcome. Lower is better; always
-            answering 0.5 scores 0.25.
+            Whether Jev's odds come true as often as it says: of the markets it called 70% likely, about 7 in 10
+            should happen.
           </p>
         </div>
         <EmptyState
@@ -139,7 +149,12 @@ const pnlDetail = (p: Pnl) =>
                   class="size-2 rounded-full bg-viz-1"
                   aria-hidden="true"
                 />
-                Brier, Jev
+                <SimpleTooltip
+                  tooltip="Brier score: how far predictions were from what happened. Lower is better; always guessing 50% scores 0.25."
+                  as-child
+                >
+                  <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Brier, Jev</span>
+                </SimpleTooltip>
               </dt>
               <dd class="text-xl font-semibold text-primary tabular-nums">{{ prob(all.brier_jev, 3) }}</dd>
             </div>
@@ -154,7 +169,14 @@ const pnlDetail = (p: Pnl) =>
               <dd class="text-xl font-semibold text-primary tabular-nums">{{ prob(all.brier_market, 3) }}</dd>
             </div>
             <div>
-              <dt class="text-xs text-muted">Hit rate</dt>
+              <dt class="text-xs text-muted">
+                <SimpleTooltip
+                  tooltip="Hit rate: how often the side Jev favoured over the market price won."
+                  as-child
+                >
+                  <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Hit rate</span>
+                </SimpleTooltip>
+              </dt>
               <dd class="text-xl font-semibold text-primary tabular-nums">{{ percent(all.hit_rate) }}</dd>
             </div>
           </dl>
@@ -188,7 +210,7 @@ const pnlDetail = (p: Pnl) =>
             <h2 class="text-base font-semibold text-primary">Jev against the market</h2>
             <p class="text-sm text-muted">
               Every decision, grouped by Jev's probability. Points off the diagonal are where Jev disagrees with the
-              midpoint.
+              market price.
             </p>
           </div>
           <ProbabilityChart
@@ -234,7 +256,12 @@ const pnlDetail = (p: Pnl) =>
                 class="size-2 rounded-full bg-viz-2"
                 aria-hidden="true"
               />
-              Dry run
+              <SimpleTooltip
+                tooltip="Dry run orders were only pretended, scored as if they had filled."
+                as-child
+              >
+                <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Dry run</span>
+              </SimpleTooltip>
             </dt>
             <dd
               class="text-xl font-semibold tabular-nums"
@@ -261,7 +288,7 @@ const pnlDetail = (p: Pnl) =>
         <div class="flex flex-wrap items-end justify-between gap-2">
           <div class="grid gap-1">
             <h2 class="text-base font-semibold text-primary">Hit rate and Brier by group</h2>
-            <p class="text-sm text-muted">The share of calls where the side with the larger edge won.</p>
+            <p class="text-sm text-muted">{{ groupHint }}</p>
           </div>
           <Tabs v-model="groupBy">
             <TabsList aria-label="Group by">

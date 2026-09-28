@@ -15,6 +15,7 @@ export const keys = {
   wallets: ['wallets'],
   orders: ['orders'],
   stats: ['stats'],
+  watchlist: ['watchlist'],
 } as const
 
 export const useStatus = () => useQuery({ queryKey: keys.status, queryFn: api.status })
@@ -51,3 +52,5 @@ export const useWallets = () =>
 export const useOrders = () => useQuery({ queryKey: keys.orders, queryFn: api.orders })
 
 export const useStats = () => useQuery({ queryKey: keys.stats, queryFn: api.stats })
+
+export const useWatchlist = () => useQuery({ queryKey: keys.watchlist, queryFn: api.watchlist })

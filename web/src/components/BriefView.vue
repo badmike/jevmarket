@@ -5,6 +5,7 @@ import type { BriefRecord } from '~/api/types'
 import BriefStatus from '~/components/BriefStatus.vue'
 import Icon from '~/components/Icon.vue'
 import { Alert } from '~/components/ui/alert'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import { ago, at, datedLine, hostname, points, prob, usd } from '~/lib/format'
 
 const props = defineProps<{
@@ -66,17 +67,14 @@ const move = computed(() => {
         <span>facts as of {{ brief.as_of || 'unknown' }}</span>
         <template v-if="move">
           <span aria-hidden="true">·</span>
-          <span
-            v-if="move.delta"
-            class="tabular-nums"
-          >
-            Midpoint {{ prob(move.before) }} then, {{ prob(move.current) }} now
-          </span>
-          <span
-            v-else
-            class="tabular-nums"
-          >
-            Midpoint {{ prob(move.current) }}, unchanged
+          <span class="tabular-nums">
+            <SimpleTooltip
+              tooltip="Midpoint: the market price, halfway between the best buy and sell offer."
+              as-child
+            >
+              <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Midpoint</span>
+            </SimpleTooltip>
+            {{ move.delta ? `${prob(move.before)} then, ${prob(move.current)} now` : `${prob(move.current)}, unchanged` }}
           </span>
         </template>
       </div>

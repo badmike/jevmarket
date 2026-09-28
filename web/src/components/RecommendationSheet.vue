@@ -6,6 +6,7 @@ import { useRecommendation } from '~/api/queries'
 import BriefView from '~/components/BriefView.vue'
 import { verdictSentence } from '~/components/MarketVerdict.vue'
 import Icon from '~/components/Icon.vue'
+import MarketAvatar from '~/components/MarketAvatar.vue'
 import OrderDialog from '~/components/OrderDialog.vue'
 import OrderStatus from '~/components/OrderStatus.vue'
 import ProbabilityBar from '~/components/ProbabilityBar.vue'
@@ -15,16 +16,17 @@ import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '~/components/ui/sheet'
 import { Skeleton } from '~/components/ui/skeleton'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import { useReadState } from '~/composables/useReadState'
 import { useThresholds } from '~/composables/useSettings'
-import { at, points, prob, usd } from '~/lib/format'
+import { at, day, inDays, points, prob, usd } from '~/lib/format'
 
 const props = defineProps<{ slug: string | null }>()
 const emit = defineEmits<{ close: [] }>()
 
 const { data, error, isPending, refetch } = useRecommendation(() => props.slug)
 const limits = useThresholds()
-const busy = ref<'decide' | 'brief' | null>(null)
+const busy = ref<'decide' | 'brief' | 'watch' | null>(null)
 const { markRead } = useReadState('markets')
 
 /** Opening a market marks its decision read, and so does a newer one arriving while it is open. */
@@ -42,13 +44,21 @@ const focusSheet = (event: Event) => {
   if (event.target instanceof HTMLElement) event.target.focus()
 }
 
-const act = async (kind: 'decide' | 'brief') => {
+const act = async (kind: 'decide' | 'brief' | 'watch') => {
   if (!props.slug) return
   busy.value = kind
   try {
     if (kind === 'decide') {
       await api.decide(props.slug)
       toast.success('Decided again')
+    } else if (kind === 'watch') {
+      if (data.value?.pinned) {
+        await api.unwatch(props.slug)
+        toast.success('Taken off the watchlist')
+      } else {
+        await api.watch(props.slug)
+        toast.success('On the watchlist. The price watch checks it every minute.')
+      }
     } else {
       await api.refreshBrief(props.slug)
       toast.success('Brief refreshed. Decide again to price it.')
@@ -73,9 +83,17 @@ const act = async (kind: 'decide' | 'brief') => {
       class="flex w-full flex-col gap-0 overflow-y-auto p-0 sm:max-w-2xl"
     >
       <div class="sticky top-0 z-10 grid gap-2 border-b border-border bg-background/95 p-4 pr-12 backdrop-blur-md">
-        <SheetTitle class="text-lg leading-snug text-primary">
-          {{ data?.question ?? slug }}
-        </SheetTitle>
+        <div class="flex items-center gap-3">
+          <MarketAvatar
+            v-if="data"
+            :src="data.image"
+            :name="data.question || data.slug"
+            size="md"
+          />
+          <SheetTitle class="text-lg leading-snug text-primary">
+            {{ data?.question ?? slug }}
+          </SheetTitle>
+        </div>
         <SheetDescription class="flex flex-wrap items-center gap-x-3 gap-y-1">
           <a
             v-if="slug"
@@ -92,6 +110,15 @@ const act = async (kind: 'decide' | 'brief') => {
             />
           </a>
           <span v-if="data">Decided {{ at(data.ts) }}</span>
+          <SimpleTooltip
+            v-if="data?.end_date"
+            :tooltip="`The market is scheduled to settle ${inDays(data.end_date)}. It pays out once the result is confirmed.`"
+            as-child
+          >
+            <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">
+              Resolves {{ day(data.end_date) }}
+            </span>
+          </SimpleTooltip>
         </SheetDescription>
         <div class="flex flex-wrap gap-2 pt-1">
           <Button
@@ -114,6 +141,26 @@ const act = async (kind: 'decide' | 'brief') => {
             <Icon name="lucide:newspaper" />
             Refresh brief
           </Button>
+          <SimpleTooltip
+            v-if="data && !data.settled"
+            :tooltip="
+              data.pinned
+                ? 'Stop checking this market between research rounds once its view gets old.'
+                : 'Check this market\'s price every minute and buy when it drops to the buy line, however old Jev\'s view is.'
+            "
+            as-child
+          >
+            <Button
+              size="sm"
+              variant="outline"
+              :loading="busy === 'watch'"
+              :disabled="busy !== null"
+              @click="act('watch')"
+            >
+              <Icon :name="data.pinned ? 'lucide:eye-off' : 'lucide:eye'" />
+              {{ data.pinned ? 'Unwatch' : 'Watch' }}
+            </Button>
+          </SimpleTooltip>
           <OrderDialog
             v-if="data"
             :recommendation="data"
@@ -152,7 +199,7 @@ const act = async (kind: 'decide' | 'brief') => {
                 :dry-run="data.trade.dry_run"
               />
               <span class="font-semibold text-primary tabular-nums">
-                BUY {{ data.trade.outcome }} {{ data.trade.size }} @ {{ prob(data.trade.price, 3) }}
+                {{ data.trade.side }} {{ data.trade.outcome }} {{ data.trade.size }} @ {{ prob(data.trade.price, 3) }}
               </span>
               <span class="text-muted tabular-nums">{{ usd(data.trade.usd) }}</span>
             </div>
@@ -188,7 +235,14 @@ const act = async (kind: 'decide' | 'brief') => {
             </div>
             <dl class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-4">
               <div>
-                <dt class="text-xs text-muted">Best edge</dt>
+                <dt class="text-xs text-muted">
+                  <SimpleTooltip
+                    tooltip="How much better Jev's estimate is than the price, on the better side, YES or NO."
+                    as-child
+                  >
+                    <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Best edge</span>
+                  </SimpleTooltip>
+                </dt>
                 <dd
                   class="font-semibold tabular-nums"
                   :class="data.action.startsWith('trade') ? 'text-success' : 'text-primary'"
@@ -197,20 +251,41 @@ const act = async (kind: 'decide' | 'brief') => {
                 </dd>
               </div>
               <div>
-                <dt class="text-xs text-muted">Clarity</dt>
+                <dt class="text-xs text-muted">
+                  <SimpleTooltip
+                    tooltip="How clear the market's rules are about what counts as YES, from 0 (vague) to 4 (precise)."
+                    as-child
+                  >
+                    <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Clarity</span>
+                  </SimpleTooltip>
+                </dt>
                 <dd class="font-semibold text-primary tabular-nums">
                   {{ data.clarity ?? '–' }} of 4
                   <span class="font-normal text-muted">(needs {{ limits.minClarity }})</span>
                 </dd>
               </div>
               <div>
-                <dt class="text-xs text-muted">Asks YES / NO</dt>
+                <dt class="text-xs text-muted">
+                  <SimpleTooltip
+                    tooltip="The cheapest price someone is selling YES and NO shares for right now. A share pays $1 if it wins."
+                    as-child
+                  >
+                    <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Asks YES / NO</span>
+                  </SimpleTooltip>
+                </dt>
                 <dd class="font-semibold text-primary tabular-nums">
                   {{ prob(data.yes_ask) }} / {{ prob(data.no_ask) }}
                 </dd>
               </div>
               <div>
-                <dt class="text-xs text-muted">Cost</dt>
+                <dt class="text-xs text-muted">
+                  <SimpleTooltip
+                    tooltip="What asking Jev and researching the news cost on OpenRouter."
+                    as-child
+                  >
+                    <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Cost</span>
+                  </SimpleTooltip>
+                </dt>
                 <dd class="font-semibold text-primary tabular-nums">
                   {{ usd(data.jev_cost + (data.research_cost ?? 0), true) }}
                 </dd>

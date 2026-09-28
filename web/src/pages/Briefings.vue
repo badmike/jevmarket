@@ -8,12 +8,14 @@ import type { BriefSummary } from '~/api/types'
 import BriefStatus from '~/components/BriefStatus.vue'
 import BriefView from '~/components/BriefView.vue'
 import Icon from '~/components/Icon.vue'
+import MarketAvatar from '~/components/MarketAvatar.vue'
 import QueryError from '~/components/QueryError.vue'
 import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Input } from '~/components/ui/input'
 import { Skeleton } from '~/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
+import { usePins } from '~/composables/usePins'
 import { useReadState } from '~/composables/useReadState'
 import { useThresholds } from '~/composables/useSettings'
 import { typing } from '~/composables/useShortcuts'
@@ -24,6 +26,7 @@ const router = useRouter()
 const list = useBriefs()
 const limits = useThresholds()
 const { isRead, markRead } = useReadState('briefs')
+const { isPinned, togglePin } = usePins()
 const now = useNow({ interval: 30_000 })
 const search = ref('')
 /** Settled briefs (market resolved or past its end date) are history, kept out of the way. */
@@ -35,13 +38,16 @@ const selectedId = computed(() => {
 })
 const reader = useBrief(selectedId)
 
+/** The list as shown, pinned markets first. `j` and `k` follow this order. */
 const briefs = computed(() => {
   const q = search.value.trim().toLowerCase()
-  return (list.data.value ?? []).filter(
-    (b) =>
-      b.settled === (view.value === 'settled') &&
-      (!q || (b.question ?? '').toLowerCase().includes(q) || b.slug.includes(q) || b.summary.toLowerCase().includes(q))
-  )
+  return (list.data.value ?? [])
+    .filter(
+      (b) =>
+        b.settled === (view.value === 'settled') &&
+        (!q || (b.question ?? '').toLowerCase().includes(q) || b.slug.includes(q) || b.summary.toLowerCase().includes(q))
+    )
+    .toSorted((a, b) => Number(isPinned(b.slug)) - Number(isPinned(a.slug)))
 })
 
 const settledCount = computed(() => (list.data.value ?? []).filter((b) => b.settled).length)
@@ -74,9 +80,17 @@ watch(
 )
 
 const nav = useTemplateRef('nav')
-watch(selectedId, async () => {
+const pane = useTemplateRef('pane')
+/**
+ * A newly opened brief starts at its top: the reading pane scrolls on its own on a desktop, the
+ * page does on a phone. The list keeps its place and brings the open brief into view.
+ */
+watch(selectedId, async (id) => {
   await nextTick()
   nav.value?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: 'nearest' })
+  if (id === null) return
+  pane.value?.scrollTo({ top: 0 })
+  window.scrollTo({ top: 0 })
 })
 
 /** `j` and `k` open the next and previous brief in the list, like a mail reader. */
@@ -112,7 +126,9 @@ const refresh = async () => {
 </script>
 
 <template>
-  <div class="mx-auto grid max-w-7xl gap-4">
+  <div
+    class="mx-auto grid max-w-7xl gap-4 lg:h-[calc(100svh-var(--shell-header-height)-1px-var(--shell-gutter)-var(--shell-gutter))] lg:grid-rows-[auto_minmax(0,1fr)]"
+  >
     <header
       class="grid gap-1"
       :class="selectedId !== null && 'max-lg:hidden'"
@@ -136,10 +152,10 @@ const refresh = async () => {
     />
     <div
       v-else
-      class="grid items-start gap-4 lg:grid-cols-[22rem_1fr]"
+      class="grid items-start gap-4 lg:min-h-0 lg:grid-cols-[22rem_1fr] lg:items-stretch"
     >
       <aside
-        class="grid content-start gap-3 lg:sticky lg:top-[calc(var(--shell-header-height)+1rem)]"
+        class="grid content-start gap-3 lg:min-h-0 lg:grid-rows-[auto_auto_minmax(0,1fr)]"
         :class="selectedId !== null && 'max-lg:hidden'"
       >
         <Input
@@ -168,7 +184,7 @@ const refresh = async () => {
         </div>
         <div
           v-if="list.isPending.value"
-          class="grid gap-1"
+          class="grid content-start gap-1 lg:overflow-hidden"
         >
           <div
             v-for="i in 6"
@@ -183,40 +199,61 @@ const refresh = async () => {
           v-else
           ref="nav"
           aria-label="Briefs"
-          class="-mx-1 grid gap-0.5 px-1 lg:max-h-[calc(100svh-15rem)] lg:overflow-y-auto"
+          class="-mx-1 grid content-start gap-0.5 px-1 lg:overflow-y-auto lg:overscroll-contain"
         >
-          <RouterLink
+          <div
             v-for="b in briefs"
             :key="b.id"
-            :to="{ name: 'briefings', params: { id: b.id } }"
-            class="group grid grid-cols-[0.375rem_1fr] gap-x-2.5 gap-y-1 rounded-lg border border-transparent px-3 py-2.5 transition-colors hover:bg-secondary/60"
-            active-class="border-border bg-card shadow-soft-sm hover:bg-card"
+            class="group/item relative"
           >
-            <span
-              class="mt-1.75 size-1.5 rounded-full"
-              :class="!read(b) && 'bg-accent'"
-              :aria-label="read(b) ? undefined : 'Unread'"
-              :role="read(b) ? undefined : 'img'"
-            />
-            <span
-              class="line-clamp-2 text-sm font-medium text-primary transition-opacity"
-              :class="read(b) && 'opacity-60 group-aria-[current=page]:opacity-100'"
+            <RouterLink
+              :to="{ name: 'briefings', params: { id: b.id } }"
+              class="group grid grid-cols-[2rem_1fr] gap-x-3 gap-y-1 rounded-lg border border-transparent py-2.5 pr-10 pl-3 transition-colors hover:bg-secondary/60"
+              active-class="border-border bg-card shadow-soft-sm hover:bg-card"
             >
-              {{ b.question ?? b.slug }}
-            </span>
-            <span
-              class="col-start-2 flex items-center gap-1.5 text-xs text-muted transition-opacity"
-              :class="read(b) && 'opacity-60 group-aria-[current=page]:opacity-100'"
-            >
-              <BriefStatus
-                :fresh="b.fresh"
-                :settled="b.settled"
+              <MarketAvatar
+                :src="b.image"
+                :name="b.question ?? b.slug"
+                class="row-span-2 transition-opacity"
+                :class="read(b) && 'opacity-60 group-aria-[current=page]:opacity-100'"
               />
-              <span>{{ ago(b.ts, now.getTime() / 1000) }}</span>
-              <span aria-hidden="true">·</span>
-              <span class="tabular-nums">{{ b.facts }} facts, {{ b.sources }} sources</span>
-            </span>
-          </RouterLink>
+              <span
+                class="line-clamp-2 text-sm font-medium text-primary transition-opacity"
+                :class="read(b) && 'opacity-60 group-aria-[current=page]:opacity-100'"
+              >
+                <span
+                  v-if="!read(b)"
+                  class="sr-only"
+                  >Unread:
+                </span>
+                {{ b.question ?? b.slug }}
+              </span>
+              <span
+                class="col-start-2 flex items-center gap-1.5 text-xs text-muted transition-opacity"
+                :class="read(b) && 'opacity-60 group-aria-[current=page]:opacity-100'"
+              >
+                <BriefStatus
+                  :fresh="b.fresh"
+                  :settled="b.settled"
+                />
+                <span>{{ ago(b.ts, now.getTime() / 1000) }}</span>
+                <span aria-hidden="true">·</span>
+                <span class="tabular-nums">{{ b.facts }} facts, {{ b.sources }} sources</span>
+              </span>
+            </RouterLink>
+            <Button
+              variant="ghost"
+              size="toolbar"
+              class="absolute top-2 right-2 transition-opacity focus-visible:opacity-100 group-hover/item:opacity-100"
+              :class="isPinned(b.slug) ? 'text-accent' : 'text-muted opacity-0 hover:text-primary'"
+              :aria-label="isPinned(b.slug) ? 'Unpin this market' : 'Pin this market to the top'"
+              :aria-pressed="isPinned(b.slug)"
+              :title="isPinned(b.slug) ? 'Unpin' : 'Pin to the top'"
+              @click="togglePin(b.slug)"
+            >
+              <Icon name="lucide:pin" />
+            </Button>
+          </div>
           <p
             v-if="!briefs.length"
             class="px-3 py-6 text-center text-sm text-muted"
@@ -227,7 +264,8 @@ const refresh = async () => {
       </aside>
 
       <section
-        class="min-w-0 rounded-xl bg-card p-4 shadow-soft sm:p-8"
+        ref="pane"
+        class="min-w-0 rounded-xl bg-card p-4 shadow-soft sm:p-8 lg:overflow-y-auto lg:overscroll-contain"
         :class="selectedId === null && 'max-lg:hidden'"
         aria-live="polite"
       >
@@ -267,9 +305,16 @@ const refresh = async () => {
             All briefs
           </RouterLink>
           <header class="grid gap-3">
-            <h2 class="text-2xl font-semibold text-balance text-primary">
-              {{ reader.data.value.question ?? reader.data.value.slug }}
-            </h2>
+            <div class="flex items-center gap-4">
+              <MarketAvatar
+                :src="reader.data.value.image"
+                :name="reader.data.value.question ?? reader.data.value.slug"
+                size="lg"
+              />
+              <h2 class="text-2xl font-semibold text-balance text-primary">
+                {{ reader.data.value.question ?? reader.data.value.slug }}
+              </h2>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
@@ -289,6 +334,15 @@ const refresh = async () => {
               >
                 <Icon name="lucide:refresh-cw" />
                 Refresh brief
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                :aria-pressed="isPinned(reader.data.value.slug)"
+                @click="togglePin(reader.data.value.slug)"
+              >
+                <Icon :name="isPinned(reader.data.value.slug) ? 'lucide:pin-off' : 'lucide:pin'" />
+                {{ isPinned(reader.data.value.slug) ? 'Unpin' : 'Pin' }}
               </Button>
             </div>
           </header>

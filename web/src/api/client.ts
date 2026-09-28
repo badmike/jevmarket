@@ -6,6 +6,7 @@ import type {
   ErrorBody,
   Event,
   ManualOrder,
+  MarketChoice,
   OrderEvent,
   Positions,
   Recommendation,
@@ -15,6 +16,7 @@ import type {
   Transfer,
   WalletKind,
   Wallets,
+  WatchItem,
 } from '~/api/types'
 
 /** A non-2xx answer, with the server's message, and the confirmation it wants, if any. */
@@ -29,6 +31,11 @@ export class ApiError extends Error {
   /** The action places real orders and needs `confirm` set to the phrase in `body.confirm`. */
   get needsConfirm(): boolean {
     return this.status === 428
+  }
+
+  /** The reference was an event with several open markets: these are the ones to pick from. */
+  get choices(): MarketChoice[] {
+    return this.body.choices ?? []
   }
 }
 
@@ -81,6 +88,12 @@ export const api = {
   transfer: (from: WalletKind, amountUsd: number | null) =>
     json<Transfer>('POST', 'transfer', { from, amount_usd: amountUsd }),
   stats: () => get<StatsView>('stats'),
+  watchlist: () => get<WatchItem[]>('watchlist'),
+  /** Put a market on the watchlist; one Jev never priced is decided first. */
+  watch: (reference: string) => json<Recommendation>('POST', 'watchlist', { reference }),
+  unwatch: async (slug: string) => {
+    await call('DELETE', `watchlist/${encodeURIComponent(slug)}`)
+  },
   runPass: () => send('pass'),
   pause: () => send('loop/pause'),
   resume: (confirm?: string) => send('loop/resume', { confirm }),

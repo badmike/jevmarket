@@ -124,6 +124,9 @@ const useLiveBase = () => {
       case 'stats_changed':
         void client.invalidateQueries({ queryKey: keys.stats })
         break
+      case 'watchlist_changed':
+        void client.invalidateQueries({ queryKey: keys.watchlist })
+        break
       case 'config_changed':
         void client.invalidateQueries({ queryKey: keys.config })
         break

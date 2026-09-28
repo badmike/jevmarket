@@ -13,6 +13,9 @@ const looks: Record<string, Look> = {
   trade: { label: 'Trade', variant: 'success' },
   trade_unexecuted: { label: 'Trade, not placed', variant: 'warning' },
   skip: { label: 'Skip', variant: 'secondary' },
+  sell: { label: 'Sold', variant: 'success' },
+  sell_unexecuted: { label: 'Sell, not placed', variant: 'warning' },
+  hold: { label: 'Hold', variant: 'secondary' },
 }
 
 const look = computed<Look>(() => looks[props.action] ?? { label: props.action, variant: 'secondary' })

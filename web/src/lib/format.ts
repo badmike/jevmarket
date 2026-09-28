@@ -10,6 +10,7 @@ const usd4 = new Intl.NumberFormat('en', {
 const int = new Intl.NumberFormat('en')
 const dateTime = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' })
 const clock = new Intl.DateTimeFormat('en', { timeStyle: 'medium' })
+const calendarDay = new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeZone: 'UTC' })
 const rel = new Intl.RelativeTimeFormat('en', { numeric: 'auto' })
 
 const DASH = '–'
@@ -37,6 +38,18 @@ export const at = (ts: number | null | undefined): string =>
   ts == null ? DASH : dateTime.format(new Date(ts * 1000))
 
 export const clockTime = (ts: number): string => clock.format(new Date(ts * 1000))
+
+const dayStart = (date: string) => new Date(`${date}T00:00:00Z`)
+
+/** `Oct 3, 2026` for a `YYYY-MM-DD` date. */
+export const day = (date: string | null | undefined): string =>
+  date ? calendarDay.format(dayStart(date)) : DASH
+
+/** `today`, `tomorrow`, `in 12 days` or `3 days ago` for a `YYYY-MM-DD` date, against `now` (unix seconds). */
+export const inDays = (date: string | null | undefined, now = Date.now() / 1000): string => {
+  if (!date) return DASH
+  return rel.format(Math.round(dayStart(date).getTime() / 86_400_000) - Math.floor(now / 86_400), 'day')
+}
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [
   ['day', 86400],

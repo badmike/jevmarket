@@ -16,7 +16,7 @@ const status = computed(() => {
     return {
       icon: 'lucide:circle-check',
       tone: 'text-success',
-      label: 'Fresh: passes reuse this brief until research_ttl_hours runs out',
+      label: 'Fresh: passes reuse this brief until its lifetime, set in Settings, runs out',
     }
   return {
     icon: 'lucide:clock-alert',

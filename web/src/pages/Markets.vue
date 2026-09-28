@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { useNow } from '@vueuse/core'
+import { useNow, useStorage } from '@vueuse/core'
 
 import { useLive } from '~/api/live'
-import { useRecommendations } from '~/api/queries'
+import { useRecommendations, useStatus } from '~/api/queries'
 import type { Recommendation } from '~/api/types'
 import DecideDialog from '~/components/DecideDialog.vue'
 import Icon from '~/components/Icon.vue'
+import MarketAvatar from '~/components/MarketAvatar.vue'
 import MarketVerdict from '~/components/MarketVerdict.vue'
 import QueryError from '~/components/QueryError.vue'
 import RecommendationSheet from '~/components/RecommendationSheet.vue'
+import SortSelect from '~/components/SortSelect.vue'
 import { Button } from '~/components/ui/button'
 import { EmptyState } from '~/components/ui/empty-state'
 import { Input } from '~/components/ui/input'
@@ -23,16 +25,18 @@ import {
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs'
 import { SimpleTooltip } from '~/components/ui/tooltip'
 import TableLoadingRow from '~/components/ui/TableLoadingRow.vue'
+import WatchlistTable from '~/components/WatchlistTable.vue'
 import { useReadState } from '~/composables/useReadState'
 import { useThresholds } from '~/composables/useSettings'
-import { ago, percent, points } from '~/lib/format'
-import type { TableSort } from '~/lib/table'
+import { ago, day, inDays, percent, points } from '~/lib/format'
+import { type SortKey, sortRows, type TableSort } from '~/lib/table'
 
 type Filter = 'all' | 'trade' | 'skip'
 
 const route = useRoute()
 const router = useRouter()
 const { data, error, isPending, refetch } = useRecommendations()
+const { data: status } = useStatus()
 const { touched } = useLive()
 const { isRead, markRead } = useReadState('markets')
 const limits = useThresholds()
@@ -40,10 +44,13 @@ const now = useNow({ interval: 30_000 })
 
 const search = ref('')
 const filter = ref<Filter>('all')
-/** Settled markets (resolved or past their end date) are history, kept out of the way. */
-const view = ref<'open' | 'settled'>('open')
+/**
+ * Settled markets (resolved or past their end date) are history, kept out of the way. The
+ * watchlist is what the price watch checks between research cycles.
+ */
+const view = ref<'open' | 'settled' | 'watch'>(route.query.view === 'watch' ? 'watch' : 'open')
 const inView = computed(() => (data.value ?? []).filter((r) => r.settled === (view.value === 'settled')))
-const sort = ref<TableSort>({ column: 'edge', direction: 'desc' })
+const sort = useStorage<TableSort>('jevmarket:sort:markets', { column: 'edge', direction: 'desc' })
 
 const selected = computed(() => (typeof route.params.slug === 'string' ? route.params.slug : null))
 const open = (slug: string | null) =>
@@ -51,10 +58,14 @@ const open = (slug: string | null) =>
 
 const isTrade = (r: Recommendation) => r.action.startsWith('trade')
 
-const columns: Record<string, (r: Recommendation) => number> = {
-  edge: (r) => r.edge ?? -Infinity,
+const columns: Record<string, SortKey<Recommendation>> = {
+  question: (r) => r.question || r.slug,
   p_yes: (r) => r.p_yes ?? -Infinity,
+  midpoint: (r) => r.midpoint ?? -Infinity,
+  edge: (r) => r.edge ?? -Infinity,
   answerable: (r) => r.answerable ?? -Infinity,
+  clarity: (r) => r.clarity ?? -Infinity,
+  end_date: (r) => (r.end_date ? Date.parse(r.end_date) : Infinity),
   ts: (r) => r.ts,
 }
 
@@ -92,18 +103,23 @@ const heads = computed(() => {
       hint: 'What the bot did and why. Hover a verdict for the technical reason.',
       align: 'start' as const,
     },
+    {
+      column: 'end_date',
+      label: 'Resolves',
+      hint: 'When the market is scheduled to settle and pay out the winning side.',
+    },
     { column: 'ts', label: 'Updated', hint: 'When Jev last looked at the market.' },
   ].map((h) => ({ align: 'end' as const, ...h, sortable: h.column in columns }))
 })
 
+const sortOptions = computed(() => heads.value.filter((h) => h.sortable))
+
 const rows = computed(() => {
   const q = search.value.trim().toLowerCase()
-  const key = columns[sort.value.column] ?? columns.ts!
-  const dir = sort.value.direction === 'asc' ? 1 : -1
-  return inView.value
+  const shown = inView.value
     .filter((r) => filter.value === 'all' || (filter.value === 'trade') === isTrade(r))
     .filter((r) => !q || r.question.toLowerCase().includes(q) || r.slug.includes(q))
-    .toSorted((a, b) => (key(a) - key(b)) * dir)
+  return sortRows(shown, columns, sort.value, 'ts')
 })
 
 const unread = computed(() => rows.value.filter((r) => !isRead(r.slug, r.ts)))
@@ -169,19 +185,30 @@ const emptyMessage = computed(() => {
         class="max-w-xs"
       />
       <Tabs v-model="view">
-        <TabsList aria-label="Open or settled markets">
+        <TabsList aria-label="Open, settled or watched markets">
           <TabsTrigger value="open">Open {{ counts.open }}</TabsTrigger>
           <TabsTrigger value="settled">Settled {{ counts.settled }}</TabsTrigger>
+          <TabsTrigger value="watch">Watchlist {{ status?.watch.watched ?? '' }}</TabsTrigger>
         </TabsList>
       </Tabs>
-      <Tabs v-model="filter">
+      <Tabs
+        v-if="view !== 'watch'"
+        v-model="filter"
+      >
         <TabsList aria-label="Filter by verdict">
           <TabsTrigger value="all">All {{ counts.all }}</TabsTrigger>
           <TabsTrigger value="trade">Trade {{ counts.trade }}</TabsTrigger>
           <TabsTrigger value="skip">Skip {{ counts.skip }}</TabsTrigger>
         </TabsList>
       </Tabs>
+      <SortSelect
+        v-if="view !== 'watch'"
+        v-model="sort"
+        :options="sortOptions"
+        class="sm:hidden"
+      />
       <Button
+        v-if="view !== 'watch'"
         variant="ghost"
         size="sm"
         class="ml-auto text-muted"
@@ -193,8 +220,14 @@ const emptyMessage = computed(() => {
       </Button>
     </div>
 
+    <WatchlistTable
+      v-if="view === 'watch'"
+      :selected="selected"
+      :search="search"
+      @open="open"
+    />
     <QueryError
-      v-if="error"
+      v-else-if="error"
       :error="error"
       @retry="refetch()"
     />
@@ -251,14 +284,32 @@ const emptyMessage = computed(() => {
           @click="open(r.slug)"
         >
           <TableCell class="max-w-md">
-            <RouterLink
-              :to="{ name: 'markets', params: { slug: r.slug } }"
-              replace
-              class="line-clamp-2 font-medium text-primary hover:underline"
-              @click.stop
-            >
-              {{ r.question || r.slug }}
-            </RouterLink>
+            <div class="flex min-w-0 items-center gap-3">
+              <MarketAvatar
+                :src="r.image"
+                :name="r.question || r.slug"
+              />
+              <div class="grid min-w-0 justify-items-start">
+                <RouterLink
+                  :to="{ name: 'markets', params: { slug: r.slug } }"
+                  replace
+                  class="line-clamp-2 font-medium text-primary hover:underline"
+                  @click.stop
+                >
+                  {{ r.question || r.slug }}
+                </RouterLink>
+                <span
+                  v-if="r.pinned"
+                  class="mt-0.5 inline-flex items-center gap-1 text-xs text-muted"
+                >
+                  <Icon
+                    name="lucide:eye"
+                    aria-hidden="true"
+                  />
+                  On your watchlist
+                </span>
+              </div>
+            </div>
           </TableCell>
           <TableCell
             label="Jev"
@@ -302,6 +353,24 @@ const emptyMessage = computed(() => {
           </TableCell>
           <TableCell label="Verdict">
             <MarketVerdict :recommendation="r" />
+          </TableCell>
+          <TableCell
+            label="Resolves"
+            labelled
+            class="text-right text-xs whitespace-nowrap"
+          >
+            <span
+              v-if="r.end_date"
+              class="grid"
+            >
+              <span class="text-primary">{{ day(r.end_date) }}</span>
+              <span class="text-muted">{{ inDays(r.end_date, now.getTime() / 1000) }}</span>
+            </span>
+            <span
+              v-else
+              class="text-muted"
+              >–</span
+            >
           </TableCell>
           <TableCell
             label="Updated"

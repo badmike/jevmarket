@@ -3,6 +3,7 @@ import { toast } from 'vue-sonner'
 
 import { api, errorMessage } from '~/api/client'
 import Icon from '~/components/Icon.vue'
+import MarketChoiceSelect from '~/components/MarketChoiceSelect.vue'
 import { Button } from '~/components/ui/button'
 import {
   Dialog,
@@ -16,26 +17,27 @@ import {
 import { Input } from '~/components/ui/input'
 import { Label } from '~/components/ui/label'
 import { Switch } from '~/components/ui/switch'
+import { useMarketReference } from '~/composables/useMarketReference'
 
 const router = useRouter()
 const open = ref(false)
-const reference = ref('')
+const { reference, choices, choice, target, offerChoices } = useMarketReference()
 const fresh = ref(false)
 const busy = ref(false)
 const error = ref<string | null>(null)
 
 const submit = async () => {
-  if (!reference.value.trim() || busy.value) return
+  if (!target.value || busy.value) return
   busy.value = true
   error.value = null
   try {
-    const r = await api.decide(reference.value.trim(), fresh.value)
+    const r = await api.decide(target.value, fresh.value)
     toast.success(`Decided: ${r.question}`)
     open.value = false
     reference.value = ''
     await router.push({ name: 'markets', params: { slug: r.slug } })
   } catch (e) {
-    error.value = errorMessage(e)
+    if (!offerChoices(e)) error.value = errorMessage(e)
   } finally {
     busy.value = false
   }
@@ -83,6 +85,17 @@ const submit = async () => {
             {{ error }}
           </p>
         </div>
+        <div
+          v-if="choices.length"
+          class="grid gap-1.5"
+        >
+          <Label for="decide-choice">This event has {{ choices.length }} open markets. Which one?</Label>
+          <MarketChoiceSelect
+            id="decide-choice"
+            v-model="choice"
+            :choices="choices"
+          />
+        </div>
         <div class="flex items-center gap-2">
           <Switch
             id="decide-fresh"
@@ -95,7 +108,7 @@ const submit = async () => {
             type="submit"
             variant="accent"
             :loading="busy"
-            :disabled="!reference.trim()"
+            :disabled="!target || (choices.length > 0 && !choice)"
           >
             Decide
           </Button>

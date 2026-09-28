@@ -31,6 +31,13 @@ interface Line {
   to?: { name: string; params: Record<string, string | number> }
 }
 
+const decisionLabels: Record<string, string> = {
+  skip: 'Skip',
+  hold: 'Hold',
+  sell: 'Sell signal',
+  sell_unexecuted: 'Sell signal',
+}
+
 const describe = (e: ActivityEvent): Line => {
   switch (e.type) {
     case 'pass_started':
@@ -52,11 +59,13 @@ const describe = (e: ActivityEvent): Line => {
     case 'decision': {
       const r = e.recommendation
       const view = r.p_yes == null ? 'pre-screen' : `Jev ${prob(r.p_yes)} vs ${prob(r.midpoint)}, edge ${points(r.edge)}`
+      const quiet = r.action === 'skip' || r.action === 'hold'
+      const label = decisionLabels[r.action] ?? 'Trade signal'
       return {
         ts: r.ts,
-        icon: r.action === 'skip' ? 'lucide:circle-minus' : 'lucide:target',
-        tone: r.action === 'skip' ? 'text-muted' : 'text-success',
-        text: `${r.action === 'skip' ? 'Skip' : 'Trade signal'}: ${r.question} (${view})`,
+        icon: quiet ? 'lucide:circle-minus' : 'lucide:target',
+        tone: quiet ? 'text-muted' : 'text-success',
+        text: `${label}: ${r.question} (${view})`,
         to: { name: 'markets', params: { slug: r.slug } },
       }
     }
@@ -67,7 +76,7 @@ const describe = (e: ActivityEvent): Line => {
         ts: o.ts,
         icon: 'lucide:receipt',
         tone: o.status === 'rejected' || o.status === 'refused' ? 'text-destructive' : 'text-accent',
-        text: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} ${o.status}: BUY ${o.outcome} ${o.size} @ ${prob(o.price, 3)} (${usd(o.usd)}) on ${o.title}${o.message ? `, ${o.message}` : ''}`,
+        text: `${kind.charAt(0).toUpperCase()}${kind.slice(1)} ${o.status}: ${o.side} ${o.outcome} ${o.size} @ ${prob(o.price, 3)} (${usd(o.usd)}) on ${o.title}${o.message ? `, ${o.message}` : ''}`,
       }
     }
     case 'brief':

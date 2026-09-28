@@ -14,5 +14,6 @@ export function useThresholds() {
     maxPriceMove: num('research_max_price_move', 0.05),
     maxUsdPerTrade: num('max_usd_per_trade', 5),
     suspiciousEdge: num('suspicious_edge', 0.25),
+    minTradePrice: num('min_trade_price', 0.1),
   }))
 }

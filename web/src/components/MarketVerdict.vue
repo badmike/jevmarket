@@ -45,6 +45,10 @@ const skips: Record<SkipCode, { label: string; because: (r: Recommendation, l: L
     label: 'Research failed',
     because: () => 'Fresh research could not be fetched before trading',
   },
+  stale_view: {
+    label: 'Jev unavailable',
+    because: () => 'The price moved and Jev could not be asked again before trading',
+  },
 }
 
 const skipOf = (r: Recommendation) => (r.action === 'skip' && r.skip_code ? skips[r.skip_code] : undefined)
@@ -66,6 +70,12 @@ export function verdictSentence(r: Recommendation, limits: Limits): string {
     return `${view} Its estimate for ${side} beats the price by ${points(r.edge)}, so the bot bought ${side}${dryRun}.`
   }
   if (r.action === 'trade_unexecuted') return `${view} The bot wanted to buy ${side}, but the order was not placed.`
+  if (r.action === 'sell') {
+    const dryRun = r.trade?.dry_run ? ' (dry run)' : ''
+    return `${view} Buyers now pay more for ${side} than Jev thinks it is worth, so the bot sold its shares early at a profit${dryRun}.`
+  }
+  if (r.action === 'sell_unexecuted') return `${view} The bot wanted to sell its ${side} shares early, but the order was not placed.`
+  if (r.action === 'hold') return `${view} The bot checked whether to sell its shares early and kept them.`
   const skip = skipOf(r)
   return skip ? `${view} ${skip.because(r, limits)}, so the bot skipped it.` : `${view} The bot skipped it.`
 }

@@ -26,7 +26,7 @@ export const groups: FieldGroup[] = [
     fields: {
       openrouter_api_key: {
         label: 'OpenRouter API key',
-        help: 'Pays for Jev and the researcher. Create one at openrouter.ai with prepaid credits.',
+        help: 'Pays for Jev and the researcher, the two AI models the bot uses. Create one at openrouter.ai with prepaid credits.',
       },
       polymarket_private_key: {
         label: 'Polymarket private key',
@@ -66,16 +66,44 @@ export const groups: FieldGroup[] = [
       },
       max_open_exposure_usd: {
         label: 'Max open exposure (USD)',
-        help: 'Positions plus unfilled buy orders may not exceed this. Also the bankroll the bet sizing works from.',
+        help: 'The most money that may be at risk at once: positions plus buy orders still waiting to fill. Bets are sized as a share of this amount.',
       },
       max_trades_per_run: {
-        label: 'Max trades per pass',
-        help: 'The bot stops ordering for the rest of a pass after this many orders.',
+        label: 'Max trades per research cycle',
+        help: 'The bot stops ordering after this many orders until the next research cycle starts. The price watch counts toward it.',
         integer: true,
       },
       kelly_fraction: {
-        label: 'Kelly fraction',
-        help: 'How boldly to size bets: 1 is the full Kelly amount, 0.25 bets a quarter of it. Lower is safer.',
+        label: 'Bet size (Kelly fraction)',
+        help: 'How boldly to size bets. The Kelly formula picks a bet size from the edge and the money available; 1 bets its full amount, 0.25 a quarter of it. Lower is safer.',
+      },
+    },
+  },
+  {
+    title: 'Price watch',
+    description: 'Between research cycles, the daemon checks the prices of markets Jev already has a view on.',
+    fields: {
+      watch_interval_secs: {
+        label: 'Check prices every (seconds)',
+        help: 'How often the daemon compares recent Jev views with the live order books. A check costs nothing unless a price crosses the buy line. 0 turns the watch off.',
+        integer: true,
+      },
+      trade_brief_max_age_minutes: {
+        label: 'Max brief age for a trade (minutes)',
+        help: 'When a price crosses the buy line, a brief older than this is researched again before the bot buys.',
+        integer: true,
+      },
+      sell_early: {
+        label: 'Sell early',
+        help: 'Let the price watch sell a position before the market resolves, when selling is clearly the better deal.',
+      },
+      min_exit_edge: {
+        label: 'Sell when the price beats Jev by',
+        help: 'Sell only when buyers pay at least this much more per share than Jev thinks the share is worth, e.g. 0.05 is 5 cents.',
+      },
+      min_exit_profit: {
+        label: 'Minimum profit to sell',
+        help: 'Sell only when selling returns at least this share of what the position cost, e.g. 0.2 is 20%.',
       },
     },
   },
@@ -89,7 +117,7 @@ export const groups: FieldGroup[] = [
       },
       min_answerable: {
         label: 'Min answerable',
-        help: 'How sure Jev must be that it has enough information to judge the question, from 0 to 1.',
+        help: 'How sure Jev must be that it has enough information to judge the question, from 0 (guessing) to 1 (sure).',
       },
       min_clarity: {
         label: 'Min clarity',
@@ -116,7 +144,7 @@ export const groups: FieldGroup[] = [
     fields: {
       jev_model: {
         label: 'Jev model',
-        help: 'The Jev version on OpenRouter. Pin one for stable behaviour, or use typesafe/jev-latest.',
+        help: 'The Jev version on OpenRouter. Pick a fixed one for stable behaviour, or use typesafe/jev-latest.',
       },
       jev_sees_market_price: {
         label: 'Jev sees the market price',
@@ -141,8 +169,8 @@ export const groups: FieldGroup[] = [
         help: 'Reuse a brief for this long before researching the market again.',
       },
       max_research_per_run: {
-        label: 'Max briefs per pass',
-        help: 'At most this many new briefs per pass: a cap on research spend.',
+        label: 'Max briefs per research cycle',
+        help: 'At most this many new briefs until the next research cycle starts, including the ones the price watch asks for: a cap on research spend.',
         integer: true,
       },
       research_max_results: {
@@ -165,7 +193,7 @@ export const groups: FieldGroup[] = [
       },
       concurrency: {
         label: 'Concurrency',
-        help: 'Markets researched and priced at the same time. Orders still go out one at a time.',
+        help: 'How many markets are researched and priced at the same time. Orders still go out one at a time.',
         integer: true,
       },
     },
@@ -176,7 +204,7 @@ export const groups: FieldGroup[] = [
     fields: {
       min_liquidity_usd: {
         label: 'Min liquidity (USD)',
-        help: 'Skip markets with less money in the order book than this: hard to trade at a fair price.',
+        help: 'Skip markets with less money waiting in buy and sell offers than this: hard to trade at a fair price.',
       },
       min_volume_usd: {
         label: 'Min volume (USD)',
@@ -189,7 +217,7 @@ export const groups: FieldGroup[] = [
       },
       max_spread: {
         label: 'Max spread',
-        help: 'Skip markets where the gap between the best buy and sell price is wider than this.',
+        help: 'Skip markets where the gap between the best buy and sell offer is wider than this, e.g. 0.05 is 5 cents.',
       },
       min_market_price: {
         label: 'Min market price',
@@ -219,12 +247,12 @@ export const groups: FieldGroup[] = [
         help: 'The OpenRouter API. Change it only for a proxy or a compatible gateway.',
       },
       clob_host: {
-        label: 'CLOB host',
-        help: "Polymarket's order book API, used for prices and orders.",
+        label: 'Order book URL (CLOB host)',
+        help: "Polymarket's trading API, where the bot reads prices and sends orders.",
       },
       polygon_rpc_url: {
         label: 'Polygon RPC URL',
-        help: 'Reads wallet balances and checks the deposit wallet on-chain. A private RPC is more reliable than the public default.',
+        help: 'The Polygon blockchain server the bot asks for wallet balances. A private one is more reliable than the public default.',
       },
     },
   },
@@ -233,7 +261,7 @@ export const groups: FieldGroup[] = [
     fields: {
       dry_run: {
         label: 'Dry run',
-        help: 'Log the orders the bot would place instead of placing them. Turning it off needs a typed confirmation.',
+        help: 'The bot pretends to trade: it logs the orders it would place and places none. Turning it off needs a typed confirmation.',
       },
       db_path: {
         label: 'Database file',

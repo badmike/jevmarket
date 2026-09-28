@@ -40,6 +40,81 @@ export interface Status {
   /** All time, as logged in the database, plus everything since the daemon started. */
   spend_total: Spend
   last_error: string | null
+  watch: Watch
+}
+
+/** The price watch between research cycles. */
+export interface Watch {
+  /** Seconds between ticks; 0 when the watch is off. */
+  interval_secs: number
+  last_tick_at: number | null
+  /** `null` while the watch is off, the loop paused or a research cycle running. */
+  next_tick_at: number | null
+  /** Markets checked in the last tick. */
+  watched: number
+  /** Trade signals in the last tick. */
+  signals: number
+  last_signal: WatchSignal | null
+  /** Why the last tick failed. */
+  error: string | null
+}
+
+/** A market where the watch found a trade or exit signal. */
+export interface WatchSignal {
+  ts: number
+  slug: string
+  question: string
+  /** An exit from a held position rather than a buy. */
+  sell: boolean
+}
+
+/** One outcome of a watched market. */
+export interface WatchSide {
+  ask: number | null
+  /** The highest ask the signal buys at; `null` when no ask in the trade band could trigger. */
+  trigger: number | null
+  /** `ask - trigger`: how far the ask has to fall. Zero or below is a signal. */
+  distance: number | null
+}
+
+/** One watched market as the last tick saw it. */
+export interface WatchItem {
+  slug: string
+  question: string
+  /** Jev's stored probability of YES. */
+  p_yes: number
+  /** When Jev gave it. */
+  view_at: number
+  /** When the brief behind the view was written; `null` without one. */
+  brief_at: number | null
+  /** Live midpoint. */
+  midpoint: number | null
+  /** When the market is scheduled to resolve, `YYYY-MM-DD`. */
+  end_date: string | null
+  /** Buy sides; empty for a held position. */
+  yes: WatchSide
+  no: WatchSide
+  /** The tick found a trade or exit signal here. */
+  signal: boolean
+  /** A person put the market on the watchlist. */
+  pinned: boolean
+  /** The wallet holds shares here: the watch looks for an exit instead of a buy. */
+  position: WatchPosition | null
+  /** The market's thumbnail URL. */
+  image: string | null
+}
+
+/** A held position the watch may sell early. */
+export interface WatchPosition {
+  outcome: Side
+  size: number
+  avg_price: number
+  /** Best bid of the held outcome. */
+  bid: number | null
+  /** The lowest bid the watch sells at; `null` when none below 1 would. */
+  trigger: number | null
+  /** `trigger - bid`: how far the bid has to rise. Zero or below is a signal. */
+  distance: number | null
 }
 
 export type Side = 'YES' | 'NO'
@@ -55,11 +130,25 @@ export type SkipCode =
   | 'zero_stake'
   | 'min_order_too_big'
   | 'stale_brief'
+  | 'stale_view'
 
-/** `trade`, `trade_unexecuted` and `skip` today; the pipeline may log others. */
-export type Action = 'trade' | 'trade_unexecuted' | 'skip' | (string & {})
+/**
+ * `trade`, `trade_unexecuted` and `skip` from buy decisions; `sell`, `sell_unexecuted` and `hold`
+ * from the price watch's exits. The pipeline may log others.
+ */
+export type Action =
+  | 'trade'
+  | 'trade_unexecuted'
+  | 'skip'
+  | 'sell'
+  | 'sell_unexecuted'
+  | 'hold'
+  | (string & {})
+
+export type OrderSide = 'BUY' | 'SELL'
 
 export interface Trade {
+  side: OrderSide
   outcome: string
   price: number
   size: number
@@ -90,6 +179,12 @@ export interface Recommendation {
   research_cost: number | null
   /** The market resolved or its end date passed. */
   settled: boolean
+  /** When the market is scheduled to resolve, `YYYY-MM-DD`. */
+  end_date: string | null
+  /** On the watchlist a person keeps. */
+  pinned: boolean
+  /** The market's thumbnail URL. */
+  image: string | null
 }
 
 export interface Brief {
@@ -117,6 +212,8 @@ export interface BriefRecord {
   midpoint_now: number | null
   /** The market resolved or its end date passed. */
   settled: boolean
+  /** The market's thumbnail URL. */
+  image: string | null
   brief: Brief
 }
 
@@ -133,6 +230,8 @@ export interface BriefSummary {
   settled: boolean
   facts: number
   sources: number
+  /** The market's thumbnail URL. */
+  image: string | null
 }
 
 export interface RecommendationDetail extends Recommendation {
@@ -151,6 +250,10 @@ export interface Position {
   value_usd: number
   pnl_usd: number
   redeemable: boolean
+  /** The market's thumbnail URL. */
+  image: string | null
+  /** When the market is scheduled to resolve, `YYYY-MM-DD`. */
+  end_date: string | null
 }
 
 export interface OpenOrder {
@@ -215,6 +318,7 @@ export interface OrderEvent {
   slug: string
   /** The market question; the slug when unknown. */
   title: string
+  side: OrderSide
   outcome: string
   price: number
   size: number
@@ -322,6 +426,7 @@ export type Event =
   | { type: 'brief'; brief: BriefSummary }
   | { type: 'positions_changed' }
   | { type: 'stats_changed' }
+  | { type: 'watchlist_changed' }
   | { type: 'config_changed' }
   | { type: 'log'; ts: number; level: LogLevel; message: string }
   | { type: 'resync' }
@@ -335,4 +440,16 @@ export interface ErrorBody {
   confirm?: string
   /** Validation errors by setting. */
   fields?: Record<string, string>
+  /** The markets of an event link, to pick one from. */
+  choices?: MarketChoice[]
+}
+
+/** One market of a Polymarket event. */
+export interface MarketChoice {
+  slug: string
+  /** The short name Polymarket gives it inside the event, else its question. */
+  label: string
+  image: string | null
+  /** The last YES price. */
+  price: number | null
 }

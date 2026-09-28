@@ -4,11 +4,14 @@ import { useNow } from '@vueuse/core'
 import { usePositions, useStatus } from '~/api/queries'
 import ActivityFeed from '~/components/ActivityFeed.vue'
 import ExposureGauge from '~/components/ExposureGauge.vue'
+import Icon from '~/components/Icon.vue'
 import StatTile from '~/components/StatTile.vue'
 import { Alert, AlertDescription } from '~/components/ui/alert'
+import { Button } from '~/components/ui/button'
 import { Card } from '~/components/ui/card'
 import { Progress } from '~/components/ui/progress'
 import { Skeleton } from '~/components/ui/skeleton'
+import { SimpleTooltip } from '~/components/ui/tooltip'
 import { errorMessage } from '~/api/client'
 import { ago, countdown, usd } from '~/lib/format'
 import type { Spend } from '~/api/types'
@@ -36,6 +39,25 @@ const loop = computed(() => {
         detail: `Every ${Math.round(s.loop_secs / 60)} minutes`,
       }
   }
+})
+
+/** The price watch in one line: how many markets, when it checks next, the last signal. */
+const watchLine = computed(() => {
+  const s = status.value
+  if (!s) return null
+  const w = s.watch
+  if (w.interval_secs === 0) return 'Off. Set how often to check prices under Settings.'
+  const markets = `${w.watched} ${w.watched === 1 ? 'market' : 'markets'}`
+  const parts = [w.last_tick_at == null ? 'No check yet' : `Watching ${markets}`]
+  if (w.next_tick_at) parts.push(`next check in ${countdown(w.next_tick_at, seconds.value)}`)
+  if (s.state === 'paused') parts.push('only looking while the loop is paused')
+  else if (s.state === 'running' || s.state === 'stopping') parts.push('waiting for the research cycle')
+  parts.push(
+    w.last_signal
+      ? `last ${w.last_signal.sell ? 'sell' : 'buy'} signal ${ago(w.last_signal.ts, seconds.value)} on ${w.last_signal.question}`
+      : 'no signal yet'
+  )
+  return parts.join(' · ')
 })
 
 const pass = computed(() => status.value?.pass ?? status.value?.last_pass ?? null)
@@ -82,6 +104,7 @@ const progress = computed(() => {
       <template v-if="status && loop">
         <StatTile
           title="Loop"
+          hint="A pass is one research round: pick promising markets, research them, let Jev price them and trade where its estimate beats the market price."
           :icon="status.state === 'paused' ? 'lucide:pause' : 'lucide:repeat'"
           :detail="loop.detail"
         >
@@ -89,6 +112,7 @@ const progress = computed(() => {
         </StatTile>
         <StatTile
           title="Mode"
+          hint="Dry run: the bot pretends to trade and places no real orders. Live: it trades with real money."
           :icon="status.dry_run ? 'lucide:flask-conical' : 'lucide:circle-dollar-sign'"
           :detail="
             status.dry_run_forced
@@ -102,6 +126,7 @@ const progress = computed(() => {
         </StatTile>
         <StatTile
           title="OpenRouter spend"
+          hint="What the AI models cost: Jev's price estimates plus the web research for briefs."
           icon="lucide:coins"
           :detail="`${status.spend_total.jev_calls} Jev calls, ${status.spend_total.briefs} briefs, all time`"
         >
@@ -117,6 +142,7 @@ const progress = computed(() => {
       </template>
       <StatTile
         title="Exposure"
+        hint="Money at risk: positions plus buy orders still waiting to fill, against the most you allow in Settings."
         icon="lucide:gauge"
       >
         <Skeleton
@@ -171,14 +197,28 @@ const progress = computed(() => {
             <dd class="font-semibold text-primary tabular-nums">{{ pass.trades }}</dd>
           </div>
           <div>
-            <dt class="text-xs text-muted">Jev</dt>
+            <dt class="text-xs text-muted">
+              <SimpleTooltip
+                tooltip="Jev is the AI model that estimates how likely each market is to resolve YES."
+                as-child
+              >
+                <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Jev</span>
+              </SimpleTooltip>
+            </dt>
             <dd class="font-semibold text-primary tabular-nums">
               {{ usd(pass.spend.jev_usd, true) }}
               <span class="font-normal text-muted">({{ pass.spend.jev_calls }} calls)</span>
             </dd>
           </div>
           <div>
-            <dt class="text-xs text-muted">Research</dt>
+            <dt class="text-xs text-muted">
+              <SimpleTooltip
+                tooltip="A brief is the researcher's summary of recent news and facts on a market. Jev prices from it."
+                as-child
+              >
+                <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Research</span>
+              </SimpleTooltip>
+            </dt>
             <dd class="font-semibold text-primary tabular-nums">
               {{ usd(pass.spend.research_usd, true) }}
               <span class="font-normal text-muted">({{ pass.spend.briefs }} briefs)</span>
@@ -198,6 +238,43 @@ const progress = computed(() => {
       >
         The first pass starts right after launch unless the loop is paused.
       </p>
+    </Card>
+
+    <Card
+      v-if="status && watchLine"
+      class="flex flex-wrap items-center gap-x-4 gap-y-2 p-4"
+    >
+      <Icon
+        name="lucide:radar"
+        size="18"
+        class="text-muted"
+        aria-hidden="true"
+      />
+      <div class="grid min-w-0 flex-1 gap-0.5">
+        <h2 class="text-base font-semibold text-primary">
+          <SimpleTooltip
+            tooltip="Between passes, the bot checks live prices of markets Jev already priced and trades when one becomes a bargain. Checks cost nothing."
+            as-child
+          >
+            <span class="underline decoration-muted/50 decoration-dotted underline-offset-4">Price watch</span>
+          </SimpleTooltip>
+        </h2>
+        <p class="text-sm text-muted">{{ watchLine }}</p>
+        <p
+          v-if="status.watch.error"
+          class="text-sm break-words text-destructive"
+        >
+          The last check failed: {{ status.watch.error }}
+        </p>
+      </div>
+      <Button
+        v-if="status.watch.interval_secs > 0"
+        size="sm"
+        variant="outline"
+        as-child
+      >
+        <RouterLink :to="{ name: 'markets', query: { view: 'watch' } }">Open the watchlist</RouterLink>
+      </Button>
     </Card>
 
     <ActivityFeed />

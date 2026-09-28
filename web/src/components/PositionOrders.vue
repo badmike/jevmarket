@@ -54,7 +54,7 @@ const shares = (n: number) => `${n.toFixed(2)} shares`
     <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
       <h2 class="text-base font-semibold text-primary">Open orders</h2>
       <p class="text-sm text-muted">
-        <template v-if="openOrders.length">Waiting on the book to fill</template>
+        <template v-if="openOrders.length">Buy orders waiting for a seller at their price</template>
         <template v-else>Nothing waiting to fill</template>
       </p>
     </div>

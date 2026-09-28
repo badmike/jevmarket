@@ -21,6 +21,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const root = ref<InstanceType<typeof Primitive>>()
+/** Once shown, the spinner takes the place of the slot's own icon; the text stays. */
 const showSpinner = ref(false)
 const lockedWidth = ref<string>()
 let spinnerTimer: ReturnType<typeof setTimeout> | undefined
@@ -53,10 +54,15 @@ onUnmounted(() => clearTimeout(spinnerTimer))
     :as-child="asChild"
     :disabled="loading || undefined"
     :aria-busy="loading || undefined"
-    :class="cn(buttonVariants({ variant, size }), props.class)"
+    :class="
+      cn(buttonVariants({ variant, size }), showSpinner && '[&>svg:not([data-spinner])]:hidden', props.class)
+    "
     :style="lockedWidth ? { minWidth: lockedWidth } : undefined"
   >
-    <Spinner v-if="showSpinner" />
+    <Spinner
+      v-if="showSpinner"
+      data-spinner
+    />
     <slot />
   </Primitive>
 </template>
